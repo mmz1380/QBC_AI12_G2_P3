@@ -107,8 +107,11 @@ def _xy(df: pd.DataFrame, numeric: bool = False):
 
 
 def _logreg():
-    return LogisticRegression(max_iter=2000, class_weight="balanced", C=1.0,
-                              solver="saga", random_state=RANDOM_STATE)
+    # lbfgs converges cleanly (no ConvergenceWarning, which was also leaking a
+    # local filesystem path into notebook output) on both the full data and the
+    # smaller notebook sample; saga needed >2000 iterations on the smaller split.
+    return LogisticRegression(max_iter=3000, class_weight="balanced", C=1.0,
+                              solver="lbfgs", random_state=RANDOM_STATE)
 
 
 def prepare_split(df: pd.DataFrame):

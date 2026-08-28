@@ -91,9 +91,11 @@ def match_known_value(query, values, min_ratio: float = 0.6):
 
 
 def extract_product_ids(catalog: Catalog, query) -> list[int]:
+    # Real catalog ids range 4-9 digits (5,821 products have <6 digits) -- the
+    # digit count alone is not the safety check, catalog membership is.
     t = pt.normalize(query)
     found: list[int] = []
-    for m in re.finditer(r"\b(\d{6,9})\b", t):
+    for m in re.finditer(r"\b(\d{4,9})\b", t):
         pid = int(m.group(1))
         if pid in catalog._by_id.index and pid not in found:
             found.append(pid)
@@ -104,7 +106,7 @@ def resolve_product_id(catalog: Catalog, text):
     """Fuzzy map a description to a product id, searching only reviewed products
     (a Q&A only makes sense for a product that actually has reviews)."""
     t = pt.normalize(text)
-    m = re.search(r"\b(\d{6,9})\b", t)
+    m = re.search(r"\b(\d{4,9})\b", t)
     if m and int(m.group(1)) in catalog._by_id.index:
         return int(m.group(1))
     q_tokens = set(pt.tokenize(t))
@@ -183,7 +185,12 @@ class IntentRouter:
         # regression check.
         if scope and any(w in t for w in _MNG):
             return Route("managerial", scope=scope)
-        if has_qa_cue:
+        # A resolved category/brand scope with no explicit id means the query is
+        # about a whole category ("در دستهٔ اسباب‌بازی چند محصول با رضایت خوب
+        # هست؟"), not one specific product -- don't let the fuzzy title-overlap
+        # resolver below misfire onto some unrelated reviewed product just
+        # because a generic QA cue word (e.g. "چند") also appears.
+        if has_qa_cue and not scope:
             pid = resolve_product_id(self.c, query)
             if pid is not None:
                 return Route("product_qa", product_id=pid)

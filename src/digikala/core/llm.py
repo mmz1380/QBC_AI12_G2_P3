@@ -116,7 +116,16 @@ class LLM:
         import os
         p = dict(config.PROVIDERS[provider_name])
         p["provider_name"] = provider_name
-        p["api_key"] = os.environ.get(p["api_key_env"], "")
+        key_env = p["api_key_env"]
+        key_names = (key_env,) if isinstance(key_env, str) else tuple(key_env)
+        p["api_key"] = ""
+        p["api_key_source"] = None
+        for name in key_names:
+            value = os.environ.get(name, "")
+            if value:
+                p["api_key"] = value
+                p["api_key_source"] = name
+                break
         return p
 
     def _resolve_provider(self) -> dict | None:

@@ -17,6 +17,7 @@ notebooks/nb_artifacts/
 *.npy
 *.npz
 .env
+context.md
 
 # Local model caches
 *.gguf

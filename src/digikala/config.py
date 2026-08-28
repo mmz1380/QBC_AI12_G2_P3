@@ -136,9 +136,23 @@ PROVIDERS = {
              "price_note": "Estimated list cost from configured per-million-token rates.",
              "billed": True,
              "api_key_env": "PAID_API_KEY"},
+    # Metis (metisai.ir) -- an OpenAI-compatible gateway some course setups
+    # provision instead of a raw OpenAI key. Accepts either a dedicated
+    # METIS_API_KEY or the shared PAID_API_KEY (the course/project key is
+    # commonly just dropped into PAID_API_KEY, as ours was) -- api_key_env is
+    # a tuple here; core/llm.py checks each name in order and uses the first
+    # one that's actually set.
+    "metis": {"base_url": _env("METIS_BASE_URL", "https://api.metisai.ir/openai/v1"),
+              "model": _env("METIS_MODEL", "gpt-4o-mini"),
+              "price_per_m": (float(_env("PAID_IN_PRICE", "0.15")),
+                               float(_env("PAID_OUT_PRICE", "0.60"))),
+              "price_note": "Estimated list cost from the upstream gpt-4o-mini list price; "
+                             "Metis billing may differ from this estimate.",
+              "billed": True,
+              "api_key_env": ("METIS_API_KEY", "PAID_API_KEY")},
 }
 FREE_PROVIDER = _env("FREE_PROVIDER", "groq")      # which entry above the "free" mode uses
-HOSTED_PROVIDER_ORDER = ("groq", "paid")           # try order for RUN_MODE=hosted_auto
+HOSTED_PROVIDER_ORDER = ("metis", "groq", "paid")  # try order for RUN_MODE=hosted_auto
 
 # bounded retry/network-fallback for hosted calls (some Windows/VPN setups have
 # an environment proxy that hangs while a direct, no-proxy path works fine)
