@@ -33,16 +33,50 @@ if "dark" not in st.session_state:
 
 
 def _inject_theme():
+    """The .streamlit/config.toml pins Streamlit's own native theme to light, so
+    all built-in chrome (header, buttons, metrics, radio/selectbox labels,
+    dataframes) has correct contrast by default -- that static config is what
+    the *light* mode actually relies on. Toggling to dark here only changes our
+    own session state, which Streamlit's native widgets don't react to on their
+    own (their colors come from the compiled light theme) -- so every rule below
+    that touches a native `[data-testid=...]` element exists specifically to
+    re-color those widgets for dark mode; light mode would look correct even
+    without most of them, since it matches the config.toml theme already.
+    """
     dark = st.session_state.dark
     bg, fg, card = ("#0e1117", "#e6e6e6", "#1b1f2a") if dark else ("#ffffff", "#111111", "#f5f6f8")
     accent = "#ff5c5c"
+    muted = "rgba(230,230,230,.65)" if dark else "rgba(17,17,17,.6)"
+    border = "rgba(255,255,255,.15)" if dark else "rgba(128,128,128,.2)"
     st.markdown(f"""
     <style>
       .stApp {{ background:{bg}; color:{fg}; }}
+      .stApp p, .stApp span, .stApp label, .stApp li, .stApp h1, .stApp h2, .stApp h3,
+      .stApp h4, .stMarkdown, [data-testid="stMetricValue"], [data-testid="stMetricLabel"],
+      [data-testid="stMetricDelta"], [data-testid="stWidgetLabel"] p {{ color:{fg}; }}
+      header[data-testid="stHeader"] {{ background:{bg}; color:{fg}; }}
+      header[data-testid="stHeader"] svg {{ fill:{fg}; }}
       section[data-testid="stSidebar"] {{ background:{card}; }}
+      section[data-testid="stSidebar"] * {{ color:{fg}; }}
+      [data-testid="stCaptionContainer"], .stCaption, small, [data-testid="stCaptionContainer"] p {{
+        color:{muted} !important; }}
+      .stButton button {{ background:{card}; color:{fg}; border:1px solid {border}; }}
+      .stButton button:hover {{ border-color:{accent}; color:{accent}; }}
+      [data-testid="stSelectbox"] input, [data-testid="stTextInput"] input,
+      [data-testid="stTextArea"] textarea {{ background:{card}; color:{fg}; border-color:{border}; }}
+      [data-testid="stDataFrame"] {{ color:{fg}; }}
+      [data-testid="stExpander"] {{ background:{card}; border:1px solid {border}; border-radius:8px; }}
       .digi-card {{ background:{card}; border-radius:12px; padding:1rem 1.2rem; margin:.4rem 0;
-                    border:1px solid rgba(128,128,128,.2); }}
+                    border:1px solid {border}; direction:rtl; text-align:right; }}
       .digi-cite {{ color:{accent}; font-weight:600; }}
+      /* This is a Persian-language assistant: query inputs and its answers are
+         Persian text, but Streamlit's chrome (labels, buttons) is English.
+         unicode-bidi:plaintext lets each field pick its own direction from its
+         first strong character instead of forcing everything LTR -- Persian
+         input stays right-aligned/RTL, English labels stay untouched. */
+      [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea,
+      [data-testid="stSelectbox"] input {{ unicode-bidi:plaintext; }}
+      [data-testid="stMarkdownContainer"] p, [data-testid="stDataFrame"] {{ unicode-bidi:plaintext; }}
       #top {{ position:absolute; top:0; }}
       .to-top {{ position:fixed; bottom:28px; left:28px; z-index:999; background:{accent};
                  color:#fff; border-radius:50%; width:46px; height:46px; line-height:46px;
@@ -93,19 +127,25 @@ def _render_answer(ans):
 # ---- sidebar ------------------------------------------------------------
 st.sidebar.title("🛍️ Digikala Assistant")
 icon = "🌙" if not st.session_state.dark else "☀️"
+# No explicit st.rerun() here: a button click already triggers Streamlit's own
+# automatic rerun, and the session_state write above is picked up by that --
+# calling st.rerun() *before* the radio/selectbox below are reached in this
+# script pass truncates the run early enough that Streamlit drops their
+# persisted state on the next run, silently resetting "Section" back to the
+# first page. This was a real bug: toggling the theme bounced you to Overview.
 if st.sidebar.button(f"{icon}  Toggle theme", width="stretch"):
     st.session_state.dark = not st.session_state.dark
-    st.rerun()
 
 run_mode = st.sidebar.selectbox(
     "LLM run mode", ["extractive", "local", "hosted_auto", "free", "paid"],
     index=0, help="extractive = $0 grounded fallback · local = Qwen/Ollama · "
                   "hosted_auto = auto-detect a .env key (groq then paid) · "
-                  "free = Groq/OpenRouter · paid = $5 credit")
+                  "free = Groq/OpenRouter · paid = $5 credit",
+    key="run_mode_select")
 page = st.sidebar.radio("Section", [
     "Overview (Phase 1)", "🔎 Discovery", "💬 Review Q&A", "⚖️ Compare",
     "📊 Manager analytics", "🤖 Recommendation predictor (Phase 3)", "🧪 Evaluation (Phase 4)",
-    "🏆 Bonus & Engineering"])
+    "🏆 Bonus & Engineering"], key="section_radio")
 st.sidebar.caption(f"Budget cap: ${config.BUDGET_USD} · mode: `{run_mode}`")
 
 
@@ -121,12 +161,12 @@ def page_overview():
     for c, (k, v) in zip(cols, labels):
         c.metric(k, f"{v:,}")
     c1, c2 = st.columns(2)
-    c1.plotly_chart(eda.fig_recommendation_balance(comments), width="stretch")
-    c2.plotly_chart(eda.fig_price_distribution(products), width="stretch")
+    c1.plotly_chart(eda.fig_recommendation_balance(comments), width="stretch", theme=None)
+    c2.plotly_chart(eda.fig_price_distribution(products), width="stretch", theme=None)
     c3, c4 = st.columns(2)
-    c3.plotly_chart(eda.fig_top_categories(products), width="stretch")
-    c4.plotly_chart(eda.fig_top_brands(products), width="stretch")
-    st.plotly_chart(eda.fig_missingness(products, comments), width="stretch")
+    c3.plotly_chart(eda.fig_top_categories(products), width="stretch", theme=None)
+    c4.plotly_chart(eda.fig_top_brands(products), width="stretch", theme=None)
+    st.plotly_chart(eda.fig_missingness(products, comments), width="stretch", theme=None)
 
 
 def page_discovery():
@@ -157,10 +197,12 @@ def page_compare():
     st.header("⚖️ Product comparison — Try it!")
     assistant = _load_assistant(run_mode)
     top = (assistant.c.products.sort_values("comment_count", ascending=False)
-           .head(50)["product_id"].tolist())
+           .head(50)[["product_id", "title_fa"]])
+    ids = top["product_id"].tolist()
+    label = lambda p: f"{p} — {top.set_index('product_id').loc[p, 'title_fa'][:50]}"
     c1, c2 = st.columns(2)
-    p1 = c1.selectbox("Product A", top, index=0)
-    p2 = c2.selectbox("Product B", top, index=min(1, len(top) - 1))
+    p1 = c1.selectbox("Product A", ids, index=0, format_func=label)
+    p2 = c2.selectbox("Product B", ids, index=min(1, len(ids) - 1), format_func=label)
     if st.button("Compare", type="primary"):
         _render_answer(assistant.answer(f"محصول {p1} و محصول {p2} را از نظر کیفیت مقایسه کن"))
 
@@ -180,7 +222,7 @@ def page_manager():
             if not terms.empty:
                 st.plotly_chart(px.bar(terms, x="count", y="term", orientation="h",
                                        title="Top complaint terms", template="plotly_white"),
-                                width="stretch")
+                                width="stretch", theme=None)
 
 
 def page_predictor():
@@ -209,7 +251,7 @@ def page_predictor():
             st.info(f"**Leakage ablation** — text-only {abl['text_only_macro_f1']} vs "
                     f"text+numeric {abl['text_plus_numeric_macro_f1']} "
                     f"(the +{abl['leakage_lift']} is leakage from rate/likes; excluded from the final model).")
-        st.plotly_chart(recommend.fig_confusion(m), width="stretch")
+        st.plotly_chart(recommend.fig_confusion(m), width="stretch", theme=None)
 
 
 def page_eval():
