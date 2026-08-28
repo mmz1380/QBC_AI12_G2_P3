@@ -1,0 +1,22 @@
+.venv
+.venv312
+.idea
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Data & large artifacts are reproducible from the pinned HF revision + run.py.
+data/raw/
+data/processed/
+data/index/
+artifacts/figures/
+artifacts/metrics/
+artifacts/models/
+notebooks/nb_artifacts/
+*.parquet
+*.npy
+*.npz
+.env
+
+# Local model caches
+*.gguf
