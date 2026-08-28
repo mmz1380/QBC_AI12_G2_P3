@@ -66,8 +66,10 @@ def _inject_theme():
       [data-testid="stTextArea"] textarea {{ background:{card}; color:{fg}; border-color:{border}; }}
       [data-testid="stDataFrame"] {{ color:{fg}; }}
       [data-testid="stExpander"] {{ background:{card}; border:1px solid {border}; border-radius:8px; }}
-      .digi-card {{ background:{card}; border-radius:12px; padding:1rem 1.2rem; margin:.4rem 0;
-                    border:1px solid {border}; direction:rtl; text-align:right; }}
+      div[class*="st-key-digi-card"] {{ background:{card}; border-radius:12px;
+        padding:1rem 1.2rem; margin:.4rem 0; border:1px solid {border};
+        direction:rtl; text-align:right; }}
+      div[class*="st-key-digi-card"] p {{ line-height:1.9; margin-bottom:.6rem; }}
       .digi-cite {{ color:{accent}; font-weight:600; }}
       /* This is a Persian-language assistant: query inputs and its answers are
          Persian text, but Streamlit's chrome (labels, buttons) is English.
@@ -110,14 +112,29 @@ def _load_p3():
     return recommend
 
 
+_card_seq = [0]
+
+
 def _card(md: str):
-    st.markdown(f'<div class="digi-card">{md}</div>', unsafe_allow_html=True)
+    # A CommonMark raw-HTML block (<div>...) does NOT get its contents re-parsed
+    # as markdown -- embedding the answer text inside `<div class="digi-card">`
+    # via unsafe_allow_html silently swallowed every newline/hard-break, which is
+    # why multi-item answers (discovery lists, comparisons) rendered as one
+    # unreadable wall of text. st.container(key=...) gives the same bordered-box
+    # look via CSS (targeting the st-key-digi-card-* class it generates) while
+    # letting st.markdown actually parse the text as markdown.
+    _card_seq[0] += 1
+    with st.container(key=f"digi-card-{_card_seq[0]}"):
+        st.markdown(md, unsafe_allow_html=True)
 
 
 def _render_answer(ans):
     st.caption(f"intent: **{ans.intent}** · tier: **{ans.tier}** · latency: "
                f"**{ans.latency_s}s** · cost: **${ans.cost_usd:.4f}**"
                + (" · ⚠️ missing info" if ans.missing_info else ""))
+    # markdown hard-break = two trailing spaces + newline; each numbered fact /
+    # citation the assistant emits on its own "\n" becomes its own visible line
+    # instead of running together.
     _card(ans.text.replace("\n", "  \n"))
     if ans.citations or ans.review_citations:
         st.caption("Cited: " + " ".join(f"`محصول {c}`" for c in ans.citations)
@@ -181,13 +198,49 @@ def page_discovery():
                          width="stretch")
 
 
+_BROWSE_N = 1000  # a browsable slice for the dropdown -- not a cap on what you can reach
+
+
+@st.cache_data(show_spinner=False)
+def _reviewed_products(_assistant, run_mode: str):
+    """All products that have at least one review -- the real universe for Q&A/
+    Compare (≈330k of the 948k catalog products), not just whichever ones happen
+    to be most-commented. `_assistant` is prefixed with `_` so Streamlit doesn't
+    try to hash the (large, unhashable) object; `run_mode` makes the cache key
+    vary correctly when a different assistant instance is loaded."""
+    prods = _assistant.c.products
+    reviewed = prods[prods["comment_count"] > 0]
+    return reviewed.sort_values("comment_count", ascending=False)[["product_id", "title_fa", "comment_count"]]
+
+
+def _pick_product(assistant, label: str, key: str):
+    """A browsable top-N dropdown (fast, convenient) plus a manual product-id
+    field that reaches any of the ~330k reviewed products directly -- the
+    dropdown alone used to be the only way in, capped at 50 products."""
+    reviewed = _reviewed_products(assistant, run_mode)
+    browse = reviewed.head(_BROWSE_N)
+    ids = browse["product_id"].tolist()
+    titles = browse.set_index("product_id")["title_fa"]
+    pick = st.selectbox(f"{label} (browse top {_BROWSE_N:,} most-reviewed of {len(reviewed):,})", ids,
+                        format_func=lambda p: f"{p} — {titles.loc[p][:50]}", key=f"{key}_select")
+    manual = st.text_input(f"…or type any product id ({label}, optional)", key=f"{key}_manual")
+    if manual.strip():
+        try:
+            mid = int(manual.strip())
+        except ValueError:
+            st.warning(f"'{manual}' is not a valid numeric product id.")
+            return pick
+        if mid not in reviewed["product_id"].values:
+            st.warning(f"Product {mid} has no reviews (or doesn't exist) — using the dropdown pick instead.")
+            return pick
+        return mid
+    return pick
+
+
 def page_qa():
     st.header("💬 Review-based Q&A — Try it!")
     assistant = _load_assistant(run_mode)
-    top = (assistant.c.products.sort_values("comment_count", ascending=False)
-           .head(50)[["product_id", "title_fa", "comment_count"]])
-    pick = st.selectbox("Product", top["product_id"].tolist(),
-                        format_func=lambda p: f"{p} — {top.set_index('product_id').loc[p,'title_fa'][:50]}")
+    pick = _pick_product(assistant, "Product", "qa")
     q = st.text_input("Question about this product:", "کاربران از کیفیت این محصول راضی بودند؟")
     if st.button("Ask", type="primary"):
         _render_answer(assistant.answer(f"{q} محصول {pick}"))
@@ -196,13 +249,11 @@ def page_qa():
 def page_compare():
     st.header("⚖️ Product comparison — Try it!")
     assistant = _load_assistant(run_mode)
-    top = (assistant.c.products.sort_values("comment_count", ascending=False)
-           .head(50)[["product_id", "title_fa"]])
-    ids = top["product_id"].tolist()
-    label = lambda p: f"{p} — {top.set_index('product_id').loc[p, 'title_fa'][:50]}"
     c1, c2 = st.columns(2)
-    p1 = c1.selectbox("Product A", ids, index=0, format_func=label)
-    p2 = c2.selectbox("Product B", ids, index=min(1, len(ids) - 1), format_func=label)
+    with c1:
+        p1 = _pick_product(assistant, "Product A", "cmp_a")
+    with c2:
+        p2 = _pick_product(assistant, "Product B", "cmp_b")
     if st.button("Compare", type="primary"):
         _render_answer(assistant.answer(f"محصول {p1} و محصول {p2} را از نظر کیفیت مقایسه کن"))
 
@@ -211,8 +262,8 @@ def page_manager():
     st.header("📊 Manager analytics — Try it!")
     assistant = _load_assistant(run_mode)
     cats = (assistant.c.products["category1_norm"].replace("نامشخص", pd.NA)
-            .dropna().value_counts().head(30).index.tolist())
-    cat = st.selectbox("Category", cats)
+            .dropna().value_counts().index.tolist())
+    cat = st.selectbox(f"Category (all {len(cats)})", cats)
     if st.button("Analyze", type="primary"):
         a = assistant.answer(f"پرتکرارترین شکایت‌ها و نقاط ضعف در دستهٔ {cat} چیست؟")
         _render_answer(a)
