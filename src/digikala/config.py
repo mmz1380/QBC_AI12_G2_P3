@@ -174,3 +174,10 @@ PAID_PRICE_PER_M = (float(_env("PAID_IN_PRICE", "0.15")), float(_env("PAID_OUT_P
 # Which model scores answers in Phase 4. Local by default (free, offline);
 # switch to "free"/"paid"/"hosted_auto" to use a hosted judge.
 JUDGE_MODE = _env("JUDGE_MODE", "local")           # local | free | paid | hosted_auto | none
+
+# ---- Sponsored Search Auction (mentor-requested optional extension) -----
+# IMPLEMENTED != SUCCESSFUL != CLAIMABLE: the auction's technical validation
+# (invariant tests + offline simulation) can pass while still not being an
+# approved bonus item. This must stay False until the mentor explicitly signs
+# off -- never flip it just to make the bonus scorecard look better.
+MENTOR_APPROVED_AUCTION = _env("MENTOR_APPROVED_AUCTION", "0").strip().lower() in {"1", "true", "yes"}

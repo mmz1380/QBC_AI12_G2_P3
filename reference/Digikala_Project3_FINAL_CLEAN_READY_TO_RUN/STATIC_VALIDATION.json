@@ -1,0 +1,17 @@
+{
+  "nbformat_valid": true,
+  "cells": 57,
+  "code_cells": 33,
+  "syntax_errors": [],
+  "embedded_streamlit_syntax_ok": true,
+  "secret_scan": {
+    "openai_style_secret_literal": false,
+    "groq_key_literal_or_provider": false
+  },
+  "outputs_cleared": true,
+  "execution_counts_cleared": true,
+  "human_labels_rows": 10,
+  "legacy_groq_references_removed": true,
+  "back_to_top_component_present": true,
+  "compare_clipboard_button_present": true
+}

@@ -8,7 +8,7 @@ UI niceties: a light/dark toggle with a sun/moon icon, a floating back-to-top
 button, and Plotly charts throughout. Heavy artifacts (embedding index, cleaned
 tables, trained model) are loaded once via st.cache_resource. Run:
 
-    python run.py dashboard        # or: streamlit run dashboard/app.py
+    python run.py dashboard        # or: streamlit run dashboard/app_project2.py
 """
 from __future__ import annotations
 

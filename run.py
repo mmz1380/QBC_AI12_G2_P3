@@ -8,6 +8,7 @@ Usage:
     python run.py train                 # Phase 3: train the recommendation classifier
     python run.py eval                  # Phase 4: run the evaluation suite
     python run.py lora                  # bonus: LoRA fine-tune vs. the TF-IDF baseline
+    python run.py auction               # bonus: Sponsored Search Auction offline validation
     python run.py dashboard             # launch the Streamlit dashboard
     python run.py all [--sample]        # setup -> clean -> eda -> index -> train -> eval
     python run.py menu                  # interactive menu
@@ -67,6 +68,11 @@ def cmd_lora(_):
     print(lora_finetune.train_and_compare())
 
 
+def cmd_auction(_):
+    from digikala.phase5_auction import auction
+    print(auction.validate_auction_system())
+
+
 def cmd_demo(args):
     import json
     from digikala import demo
@@ -79,7 +85,7 @@ def cmd_test(_):
 
 
 def cmd_dashboard(_):
-    app = Path(__file__).resolve().parent / "dashboard" / "app.py"
+    app = Path(__file__).resolve().parent / "dashboard" / "app_project2.py"
     subprocess.run([sys.executable, "-m", "streamlit", "run", str(app)], check=False)
 
 
@@ -113,13 +119,14 @@ def main():
         ("setup", cmd_setup, False), ("clean", cmd_clean, True), ("eda", cmd_eda, False),
         ("index", cmd_index, False), ("train", cmd_train, False), ("eval", cmd_eval, False),
         ("dashboard", cmd_dashboard, False), ("all", cmd_all, True), ("menu", cmd_menu, False),
-        ("demo", cmd_demo, False), ("test", cmd_test, False), ("lora", cmd_lora, False)]:
+        ("demo", cmd_demo, False), ("test", cmd_test, False), ("lora", cmd_lora, False),
+        ("auction", cmd_auction, False)]:
         sp = sub.add_parser(name)
         if has_sample:
             sp.add_argument("--sample", action="store_true",
                             help="use the notebook-sized comments sample instead of the full 6M rows")
         if name == "demo":
-            sp.add_argument("--sample-size", type=int, default=20_000,
+            sp.add_argument("--sample-size", type=int, default=100_000,
                             help="comments in the deterministic demo sample (must match the notebook)")
         sp.set_defaults(func=fn)
     args = p.parse_args()
