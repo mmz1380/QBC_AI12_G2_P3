@@ -454,7 +454,7 @@ def page_try_it():
             campaigns = st.session_state.get("auction_campaigns") or []
             if st.session_state.get("auction_enabled", True) and campaigns:
                 from digikala.phase5_auction import auction as auction_mod
-                hits = assistant.p.search(q, k=200, method="hybrid")
+                hits = assistant.pidx.search(q, k=200, method="hybrid")
                 scores = {h["product_id"]: h["score"] for h in hits}
                 from digikala.phase2_assistant.assistant import review_stats
                 stats_lookup = {}
@@ -749,7 +749,7 @@ def page_auction():
     if st.button("⚡ Run preview auction", width="stretch"):
         from digikala.phase5_auction import auction as auction_mod
         from digikala.phase2_assistant.assistant import review_stats
-        hits = assistant.p.search(preview_q, k=200, method="hybrid")
+        hits = assistant.pidx.search(preview_q, k=200, method="hybrid")
         scores = {h["product_id"]: h["score"] for h in hits}
         stats_lookup = {}
         for c in campaigns:
