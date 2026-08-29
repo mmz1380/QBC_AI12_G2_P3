@@ -25,7 +25,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from digikala import config                          # noqa: E402
 from digikala.core.llm import LLM                    # noqa: E402
 
-st.set_page_config(page_title="Digikala Assistant", page_icon="🛍️", layout="wide")
+st.set_page_config(page_title="Digikala Assistant", page_icon="🛍️", layout="wide",
+                   initial_sidebar_state="collapsed")
 
 
 # ---- theme: CSS custom properties + instant client-side toggle ----------
@@ -260,6 +261,20 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Sidebar is collapsed by default now that the tabs are the primary nav --
+# the one control that still matters (LLM run mode) lives in the main area
+# instead of behind a sidebar the user has to reopen.
+_rm_col, _budget_col = st.columns([2, 3])
+with _rm_col:
+    run_mode = st.selectbox(
+        "LLM run mode", ["extractive", "local", "hosted_auto", "free", "paid"],
+        index=0, help="extractive = $0 grounded fallback · local = Qwen/Ollama · "
+                      "hosted_auto = auto-detect a .env key (metis/groq/paid) · "
+                      "free = Groq/OpenRouter · paid = $5 credit",
+        key="run_mode_select")
+with _budget_col:
+    st.caption(f"Budget cap: ${config.BUDGET_USD} · mode: `{run_mode}`")
+
 
 # ---- cached resources ---------------------------------------------------
 @st.cache_resource(show_spinner="Loading cleaned data…")
@@ -317,18 +332,6 @@ def fmt_toman(x):
     if x is None or pd.isna(x):
         return "نامشخص"
     return f"{float(x):,.0f} تومان"
-
-
-# ---- sidebar (just the LLM mode -- navigation is the top tabs now) -------
-st.sidebar.title("🛍️ Digikala Assistant")
-run_mode = st.sidebar.selectbox(
-    "LLM run mode", ["extractive", "local", "hosted_auto", "free", "paid"],
-    index=0, help="extractive = $0 grounded fallback · local = Qwen/Ollama · "
-                  "hosted_auto = auto-detect a .env key (groq then paid) · "
-                  "free = Groq/OpenRouter · paid = $5 credit",
-    key="run_mode_select")
-st.sidebar.caption(f"Budget cap: ${config.BUDGET_USD} · mode: `{run_mode}`")
-st.sidebar.caption("Section is now the tabs at the top of the page.")
 
 
 _BROWSE_N = 1000  # a browsable slice for the dropdown -- not a cap on what you can reach
@@ -405,7 +408,19 @@ def _search_catalog(_products: pd.DataFrame, query: str, limit: int = 8) -> pd.D
 
 
 # ---- pages ----------------------------------------------------------------
-def page_overview():
+def page_about():
+    st.header("ℹ️ About this project")
+    st.markdown("Product Discovery, Review Q&A, Comparison, Manager Analytics, Model Evaluation, a "
+               "Sponsored Search Auction for three vendors, Human Evaluation, and Dark/Light mode. "
+               "Sponsored results always carry a **Sponsored / تبلیغ** label and are never presented "
+               "to the model or the user as evidence that a product is objectively better.")
+    st.divider()
+    _page_overview()
+    st.divider()
+    _page_bonus()
+
+
+def _page_overview():
     st.header("Phase 1 — Data & EDA")
     from digikala.phase1_data import eda
     products, comments = _load_tables()
@@ -424,55 +439,55 @@ def page_overview():
     st.plotly_chart(eda.fig_missingness(products, comments), width="stretch", theme=None)
 
 
-def page_discovery():
-    st.header("🔎 Product discovery — Try it!")
-    q = st.text_input("Describe what you need (Persian):",
-                      "یک کالای اقتصادی و باکیفیت زیر ۵۰۰ هزار تومان می‌خواهم")
-    if st.button("Search", type="primary"):
+def page_try_it():
+    st.header("✨ Try it — search and ask, grounded in the real catalogue")
+    mode = st.radio("Mode", ["🔎 Product discovery", "💬 Ask about a product"], horizontal=True)
+
+    if mode == "🔎 Product discovery":
+        q = st.text_input("Describe what you need (Persian):",
+                          "یک کالای اقتصادی و باکیفیت زیر ۵۰۰ هزار تومان می‌خواهم")
+        if st.button("Search", type="primary"):
+            assistant = _load_assistant(run_mode)
+            a = assistant.answer(q)
+            _render_answer(a)
+
+            campaigns = st.session_state.get("auction_campaigns") or []
+            if st.session_state.get("auction_enabled", True) and campaigns:
+                from digikala.phase5_auction import auction as auction_mod
+                hits = assistant.p.search(q, k=200, method="hybrid")
+                scores = {h["product_id"]: h["score"] for h in hits}
+                from digikala.phase2_assistant.assistant import review_stats
+                stats_lookup = {}
+                for c in campaigns:
+                    pid = int(c["product_id"])
+                    rs = review_stats(assistant.c, pid, light=True)
+                    if rs["rec_rate"] is not None:
+                        stats_lookup[pid] = {"recommendation_rate": rs["rec_rate"] * 100}
+                sponsored = auction_mod.run_query_auction(campaigns, assistant.c.product, stats_lookup,
+                                                          query_scores=scores)
+                if sponsored:
+                    st.markdown("#### Sponsored results")
+                    for s in sponsored:
+                        prod = assistant.c.product(s["product_id"]) or {}
+                        st.markdown(
+                            f'<div class="auction-card"><span class="sponsored-pill">تبلیغ · Sponsored</span> '
+                            f'<span class="pill">{s["vendor_name"]}</span>'
+                            f'<div style="margin-top:8px;font-weight:700">{prod.get("title_fa", "")}</div>'
+                            f'<div style="margin-top:6px"><span class="pill">Product ID: {s["product_id"]}</span>'
+                            f'<span class="pill">قیمت: {fmt_toman(prod.get("price_clean"))}</span>'
+                            f'<span class="pill">Placement: {s["placement_position"]}</span></div></div>',
+                            unsafe_allow_html=True)
+
+            if a.sources:
+                st.markdown("#### Organic results")
+                st.dataframe(pd.DataFrame(a.sources)[["product_id", "title", "brand", "price", "rate", "score"]],
+                             width="stretch")
+    else:
         assistant = _load_assistant(run_mode)
-        a = assistant.answer(q)
-        _render_answer(a)
-
-        campaigns = st.session_state.get("auction_campaigns") or []
-        if st.session_state.get("auction_enabled", True) and campaigns:
-            from digikala.phase5_auction import auction as auction_mod
-            hits = assistant.p.search(q, k=200, method="hybrid")
-            scores = {h["product_id"]: h["score"] for h in hits}
-            from digikala.phase2_assistant.assistant import review_stats
-            stats_lookup = {}
-            for c in campaigns:
-                pid = int(c["product_id"])
-                rs = review_stats(assistant.c, pid, light=True)
-                if rs["rec_rate"] is not None:
-                    stats_lookup[pid] = {"recommendation_rate": rs["rec_rate"] * 100}
-            sponsored = auction_mod.run_query_auction(campaigns, assistant.c.product, stats_lookup,
-                                                      query_scores=scores)
-            if sponsored:
-                st.markdown("#### Sponsored results")
-                for s in sponsored:
-                    prod = assistant.c.product(s["product_id"]) or {}
-                    st.markdown(
-                        f'<div class="auction-card"><span class="sponsored-pill">تبلیغ · Sponsored</span> '
-                        f'<span class="pill">{s["vendor_name"]}</span>'
-                        f'<div style="margin-top:8px;font-weight:700">{prod.get("title_fa", "")}</div>'
-                        f'<div style="margin-top:6px"><span class="pill">Product ID: {s["product_id"]}</span>'
-                        f'<span class="pill">قیمت: {fmt_toman(prod.get("price_clean"))}</span>'
-                        f'<span class="pill">Placement: {s["placement_position"]}</span></div></div>',
-                        unsafe_allow_html=True)
-
-        if a.sources:
-            st.markdown("#### Organic results")
-            st.dataframe(pd.DataFrame(a.sources)[["product_id", "title", "brand", "price", "rate", "score"]],
-                         width="stretch")
-
-
-def page_qa():
-    st.header("💬 Review-based Q&A — Try it!")
-    assistant = _load_assistant(run_mode)
-    pick = _pick_product(assistant, "Product", "qa")
-    q = st.text_input("Question about this product:", "کاربران از کیفیت این محصول راضی بودند؟")
-    if st.button("Ask", type="primary"):
-        _render_answer(assistant.answer(f"{q} محصول {pick}"))
+        pick = _pick_product(assistant, "Product", "qa")
+        q = st.text_input("Question about this product:", "کاربران از کیفیت این محصول راضی بودند؟")
+        if st.button("Ask", type="primary"):
+            _render_answer(assistant.answer(f"{q} محصول {pick}"))
 
 
 def page_compare():
@@ -575,7 +590,13 @@ def page_manager():
                                 width="stretch", theme=None)
 
 
-def page_predictor():
+def page_model_eval():
+    _page_predictor()
+    st.divider()
+    _page_eval()
+
+
+def _page_predictor():
     st.header("🤖 Recommendation predictor (Phase 3) — Try it!")
     st.caption("Text-only model — no `rate`/`likes`/`is_buyer` (those leak the label). "
                "Predicts recommendation purely from the review text.")
@@ -603,7 +624,7 @@ def page_predictor():
         st.plotly_chart(recommend.fig_confusion(m), width="stretch", theme=None)
 
 
-def page_eval():
+def _page_eval():
     st.header("🧪 Evaluation (Phase 4)")
     mfile = config.METRICS_DIR / "phase4_metrics.json"
     if not mfile.exists():
@@ -808,7 +829,7 @@ def page_human_eval():
     st.caption(f"{fresh_count} of {len(candidates)} candidates labeled against their current answer.")
 
 
-def page_bonus():
+def _page_bonus():
     st.header("🏆 Bonus & Engineering")
     efile = config.METRICS_DIR / "engineering_notes.json"
     if not efile.exists():
@@ -885,10 +906,9 @@ def page_bonus():
 
 
 TABS = [
-    ("Overview", page_overview), ("🔎 Discovery", page_discovery), ("💬 Review Q&A", page_qa),
-    ("⚖️ Compare", page_compare), ("📊 Manager", page_manager), ("🤖 Predictor", page_predictor),
-    ("🧪 Evaluation", page_eval), ("📣 Auction", page_auction),
-    ("🧑‍⚖️ Human eval", page_human_eval), ("🏆 Bonus", page_bonus),
+    ("✨ Try it", page_try_it), ("⚖️ Compare", page_compare), ("📊 Manager", page_manager),
+    ("🧪 Model & Evaluation", page_model_eval), ("📣 Auction", page_auction),
+    ("🧑‍⚖️ Human eval", page_human_eval), ("ℹ️ About", page_about),
 ]
 for tab, (_, render) in zip(st.tabs([t[0] for t in TABS]), TABS):
     with tab:
