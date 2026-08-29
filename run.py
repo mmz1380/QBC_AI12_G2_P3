@@ -85,7 +85,7 @@ def cmd_test(_):
 
 
 def cmd_dashboard(_):
-    app = Path(__file__).resolve().parent / "dashboard" / "app_project2.py"
+    app = Path(__file__).resolve().parent / "dashboard" / "app.py"
     subprocess.run([sys.executable, "-m", "streamlit", "run", str(app)], check=False)
 
 
