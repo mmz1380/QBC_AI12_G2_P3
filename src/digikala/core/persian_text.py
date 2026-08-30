@@ -7,6 +7,7 @@ intent router.
 """
 from __future__ import annotations
 
+import html
 import re
 import unicodedata
 
@@ -32,7 +33,12 @@ def normalize(text: object, *, fold_digits: bool = True, drop_emoji: bool = Fals
     """Normalize a Persian string. Returns '' for NaN/None."""
     if text is None or (isinstance(text, float) and text != text):
         return ""
-    s = unicodedata.normalize("NFKC", str(text)).translate(_CHAR_MAP)
+    # Some raw titles/brands are HTML-entity-encoded (e.g. "بیو &amp; پلاس")
+    # -- undecoded, that entity shows up VERBATIM in any plain-text widget
+    # (Streamlit's multiselect tags, st.dataframe) since only HTML-rendering
+    # contexts (st.markdown) auto-decode it. Unescape before anything else.
+    s = html.unescape(str(text))
+    s = unicodedata.normalize("NFKC", s).translate(_CHAR_MAP)
     s = _URL_RE.sub(" ", s)
     if drop_emoji:
         s = _EMOJI_RE.sub(" ", s)

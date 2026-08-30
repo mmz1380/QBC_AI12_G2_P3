@@ -29,7 +29,10 @@ and **§10 (leakage)** — they're the two ideas most likely to bite you if skip
 14. [LLM-as-judge — power and pitfalls](#14-llm-as-judge--power-and-pitfalls)
 15. [Cost & resource management](#15-cost--resource-management)
 16. [Putting it all together — one query, start to finish](#16-putting-it-all-together--one-query-start-to-finish)
-17. [Glossary](#17-glossary)
+17. [Sponsored Search Auction (bonus): quality-adjusted GSP](#17-sponsored-search-auction-bonus-quality-adjusted-gsp)
+18. [Dashboard architecture: theming, caching, and section design](#18-dashboard-architecture-theming-caching-and-section-design)
+19. [Real bugs found and fixed — a live failure-analysis worked example](#19-real-bugs-found-and-fixed--a-live-failure-analysis-worked-example)
+20. [Glossary](#20-glossary)
 
 ---
 
@@ -159,11 +162,26 @@ product titled "مقرون به صرفه" ("affordable") even though the words a
 completely different.
 
 **How similarity is measured.** Once text is a vector, "similar meaning" =
-"small angle between vectors" = **cosine similarity**. If the vectors are
-already normalized to length 1 (unit vectors), cosine similarity is just a
-dot product — which is why `embed()` in `retrieval.py` passes
-`normalize_embeddings=True` to the encoder, and product search is literally
-`self.vectors @ qv` (a matrix-vector product = 948k dot products at once).
+"small angle between vectors" = **cosine similarity**:
+
+```
+cos(A, B) = (A · B) / (‖A‖ × ‖B‖) = Σᵢ(Aᵢ×Bᵢ) / (√ΣᵢAᵢ² × √ΣᵢBᵢ²)
+```
+
+It ranges from -1 (opposite direction) through 0 (unrelated/orthogonal) to 1
+(same direction, i.e. same "meaning" as far as the embedding model captured
+it) — and critically it's *scale-invariant*: a vector and that same vector
+doubled in length still score 1.0, because only the *angle* matters, not the
+magnitude. **Worked example**, 2-D for readability (real vectors are 384-D):
+`A = [1, 2]`, `B = [2, 1]` → `A·B = 1×2 + 2×1 = 4`; `‖A‖ = ‖B‖ = √5`; so
+`cos(A,B) = 4/5 = 0.8` — pointing in a similar-but-not-identical direction.
+
+If the vectors are already normalized to length 1 (`‖A‖ = ‖B‖ = 1`), the
+denominator disappears and cosine similarity **is just a dot product** — which
+is why `embed()` in `retrieval.py` passes `normalize_embeddings=True` to the
+encoder, and product search is literally `self.vectors @ qv` (one
+948,352 × 384 matrix times one 384-length query vector = 948,352 dot products,
+computed at once via optimized linear algebra instead of a Python loop).
 
 ```python
 # src/digikala/phase2_assistant/retrieval.py
@@ -207,6 +225,21 @@ codebase uses TF-IDF for **Phase 3's text classifier** (`recommend.py`,
 `TfidfVectorizer`) — turning each review's raw text into a sparse numeric
 vector a linear model can learn from.
 
+```
+TF(t, d)  = count of term t in document d
+IDF(t)    = ln( N / df(t) )            # N = total docs, df(t) = docs containing t
+TF-IDF(t,d) = TF(t,d) × IDF(t)
+```
+
+**Worked example.** Corpus of `N=1000` product titles. The word "کیفیت"
+("quality") appears in `df=800` of them — very common, so
+`IDF = ln(1000/800) ≈ 0.22`: barely distinctive, nearly ignored. The word
+"نامسبک" appears in `df=3` titles — `IDF = ln(1000/3) ≈ 5.81`: 26× the
+weight, because seeing it is strong evidence about *which* documents you're
+looking at. A word appearing in *every* document (`df=N`) gets `IDF=0` —
+mathematically zeroed out, exactly matching the intuition that a
+universally-present word carries no distinguishing information.
+
 **BM25 (Best Matching 25)** is TF-IDF's more careful cousin, purpose-built
 for *ranking documents by relevance to a query* rather than as generic
 features for a classifier. Its formula (`retrieval.py::BM25Okapi.get_scores`)
@@ -219,9 +252,23 @@ adds two refinements TF-IDF doesn't have:
   parameter corrects for that using `doc_len / avgdl`.
 
 ```python
-score(term, doc) = idf(term) * freq(term, doc) * (k1 + 1) /
-                    (freq(term, doc) + k1 * (1 - b + b * doc_len / avgdl))
+idf(term)         = ln(1 + (N - df(term) + 0.5) / (df(term) + 0.5))
+score(term, doc)  = idf(term) * freq(term, doc) * (k1 + 1) / \
+                     (freq(term, doc) + k1 * (1 - b + b * doc_len / avgdl))
+BM25(query, doc)  = sum(score(term, doc) for term in query)
 ```
+
+This project's exact IDF variant (`retrieval.py::BM25Okapi.from_texts`) is the
+**Okapi/BM25+ smoothed form**: `N` = total documents, `df(term)` = how many
+documents contain that term. The `+0.5` offsets (a Bayesian-style smoothing
+correction) and the outer `+1` guarantee `idf ≥ 0` even for a term that
+appears in *every* document (`df=N`), unlike plain TF-IDF's `ln(N/df)`, which
+would go to 0 or slightly negative — a small but real numerical-stability
+detail that matters once you start summing many terms' scores together.
+`k1=1.5` and `b=0.75` (this project's defaults) are the standard textbook
+starting values; `k1` controls how quickly extra occurrences saturate, `b`
+controls how strongly document length is penalized (`b=0` = no length
+penalty at all, `b=1` = full proportional penalty).
 
 **Why scipy-sparse, not a hand-rolled inverted index?** The textbook way to
 implement BM25 is a Python dict mapping `term -> [(doc_id, freq), ...]`. Over
@@ -478,14 +525,30 @@ task-specific dataset.
 
 **LoRA (Low-Rank Adaptation)** freezes the entire pretrained model and
 instead injects small, trainable "adapter" matrices into specific layers
-(here: the attention query and value projections). The math: instead of
-learning a full-size weight update `ΔW` (huge), LoRA learns two small
-matrices `A` and `B` such that `ΔW ≈ B·A`, where `A` and `B` have a small
-inner dimension `r` ("rank"). This project uses `r=8` — and the result is
+(here: the attention query and value projections). Normally, fine-tuning one
+weight matrix `W` (shape `d × d`) means learning a full update `ΔW`, itself a
+`d × d` matrix — `d²` numbers to train. LoRA instead **factors** `ΔW` into
+the product of two much smaller matrices:
+
+```
+ΔW ≈ B · A          B is (d × r), A is (r × d), r ≪ d ("rank")
+forward pass:  h = W₀·x + (α/r)·B·A·x        # W₀ frozen, only A,B trained
+```
+
+**Why this saves so many parameters.** The full update has `d²` numbers; the
+low-rank factorization has `d×r + r×d = 2dr` numbers. With `d` in the
+hundreds/thousands and `r=8` (this project's choice), `2dr ≪ d²` — e.g. for
+one `768×768` attention projection, a full update is `768² ≈ 590,000`
+parameters, while LoRA's is `2×768×8 ≈ 12,300` — **about 2% of one layer's
+full fine-tune**, applied only to the query/value projections rather than
+every layer. Summed across ParsBERT's layers, the actual measured result is
 **297,219 trainable parameters out of 163,140,870 total (0.18%)**
-(`phase3_lora_metrics.json`). Training touches almost nothing, so it's fast,
-memory-light, and can't catastrophically forget what the base model already
-knows about Persian.
+(`phase3_lora_metrics.json`). The `α` (`lora_alpha=16` here) is a fixed
+scaling factor on the adapter's contribution — a hyperparameter that controls
+how strongly the low-rank update is allowed to shift the frozen model's
+behavior, independent of `r` itself. Training touches almost nothing, so
+it's fast, memory-light, and can't catastrophically forget what the base
+model already knows about Persian (`W₀` never moves).
 
 ```python
 # src/digikala/phase3_predict/lora_finetune.py
@@ -519,7 +582,8 @@ along **several separate axes** instead of collapsing everything into one
 number:
 
 - **Retrieval quality** (recall@k / MRR / nDCG) — did the search actually
-  surface the relevant item? See §5–7's discussion of the two benchmarks.
+  surface the relevant item? See §5–7's discussion of the two benchmarks, and
+  the worked math just below.
 - **Grounding** — are the claims backed by what was retrieved? (citation
   coverage/validity, §8)
 - **Response quality** — does the answer actually address the question? (the
@@ -528,6 +592,89 @@ number:
 - **Latency & cost** — how long did it take, how much did it cost (§15)
 - **Failure analysis** — concrete cases where the system got something wrong,
   and why
+
+### The retrieval metrics, worked with actual numbers
+
+Every retrieval score in this project's results (README's "Results" table,
+`phase4_metrics.json`) comes from `evaluate.py::ranking_metrics`, run per
+query then averaged. Say a query has **one** truly relevant product (its own
+id, in the title→own-id benchmark) and the search returns 10 ranked results
+where the relevant one shows up at **rank 3**:
+
+**Recall@k** — of everything relevant, how much did we find in the top k?
+
+```
+Recall@k = |{relevant items}| ∩ |{top-k retrieved}| / |{relevant items}|
+```
+Here: the 1 relevant item is inside the top 10 → `Recall@10 = 1/1 = 1.0`.
+(With multiple relevant items — e.g. the natural-language benchmark, where
+a paraphrase query can have more than one acceptable match — this is the
+fraction of *all* of them you found, not just whether you found *any*.)
+
+**MRR (Mean Reciprocal Rank)** — recall doesn't care *where* in the top-k the
+hit landed; a hit at rank 1 and a hit at rank 10 count the same. MRR fixes
+that by scoring the position of the **first** relevant hit:
+
+```
+RR(query) = 1 / rank_of_first_relevant_hit      (0 if none found)
+MRR       = mean(RR)  over all queries
+```
+Here: the hit is at rank 3 → `RR = 1/3 = 0.333` for this query. A hit at
+rank 1 scores `1.0` (perfect); a hit at rank 10 scores only `0.1` — the same
+"found it" outcome as Recall@k, but MRR rewards finding it *near the top*,
+which is what a real user actually experiences (nobody reads to result #10).
+
+**nDCG@k (normalized Discounted Cumulative Gain)** — the most complete of the
+three: like MRR it rewards *high rank*, but it also generalizes to
+*graded* relevance (some results can be "somewhat" relevant, not just
+binary hit/miss), which the other two can't express.
+
+```
+DCG@k  = Σᵢ₌₁..k (2^relᵢ − 1) / log₂(i + 1)         # i = rank position (1-indexed)
+IDCG@k = DCG@k of the best possible ordering (all relevant items ranked first)
+nDCG@k = DCG@k / IDCG@k
+```
+(This project's code indexes ranks from 0, so its `log2(i + 2)` for
+`i = 0, 1, 2, ...` is the same formula shifted to 0-indexing — same math,
+different starting counter.) The `2^rel − 1` numerator means relevance
+contributes *exponentially*, not linearly — a highly-relevant result matters
+disproportionately more than a mildly-relevant one — and the `log₂(i+1)`
+denominator *discounts* a hit by how far down the ranking it is, so a hit at
+rank 1 (`log₂2=1`, no discount) counts far more than the same hit at rank 10
+(`log₂11≈3.46`, discounted to ~29% of its raw value). Dividing by `IDCG`
+(the score of a perfect ranking) **normalizes** the result to `[0, 1]`
+regardless of how many relevant items exist or how the raw scores happen to
+be scaled — which is exactly what makes nDCG comparable *across different
+queries* with different numbers of relevant items, unlike raw DCG.
+
+**Why report all three instead of picking one?** They disagree on purpose in
+different situations, and that disagreement is informative: a method that's
+great at Recall@k but bad at MRR is finding the right thing but burying it
+low in the ranking (bad user experience even though it's "technically"
+there); a method with high MRR but built on a binary hit/miss signal misses
+the graded-relevance nuance nDCG captures. This project's own honest
+finding — BM25-only beats hybrid on **MRR and nDCG** even though the two
+methods tie on **Recall@10** (`phase4_metrics.json`) — is a concrete example
+of exactly this: both methods eventually surface the relevant item somewhere
+in the top 10 (equal recall), but BM25 tends to rank it *higher* (better
+MRR/nDCG) on this particular exact-title benchmark.
+
+**Spearman's ρ (rank correlation)**, used to check judge-vs-human agreement
+(§14): given two ranked/scored lists over the same items (here, the judge's
+0–5 scores and a human's 0–5 scores on the same queries), convert each list
+to ranks, then compute the standard Pearson correlation *of the ranks*:
+
+```
+ρ = 1 − (6 × Σdᵢ²) / (n × (n² − 1))     where dᵢ = rank difference for item i
+```
+`ρ = 1` means the two raters agree on the *relative ordering* perfectly (not
+necessarily the exact same numbers); `ρ = 0` means no rank relationship;
+`ρ = -1` means they rank everything in exactly opposite order. It's the
+right tool here (rather than plain correlation on the raw 0–5 numbers)
+because a 0–5 integer judge score is an *ordinal* scale — "5 is better than
+3" is meaningful, but "5 is exactly 5/3 as good as 3" isn't, so a
+correlation that only cares about relative order is the honest match for
+what the scores actually represent.
 
 **Why two retrieval benchmarks and two quality-scoring methods (§14) instead
 of one?** Any single evaluation method has blind spots specific to how it was
@@ -653,7 +800,180 @@ design philosophy in one query.
 
 ---
 
-## 17. Glossary
+## 17. Sponsored Search Auction (bonus): quality-adjusted GSP
+
+A mentor-suggested extension (`src/digikala/phase5_auction/auction.py`):
+three vendors each register a `product_id` and a `max_cpc` (the most they'll
+pay per click, in Toman). The question is *who gets shown, in what order, and
+how much do they actually pay* — the classic sponsored-search-auction problem
+real ad platforms (Google, Digikala itself) solve.
+
+**Why not just rank by bid?** The highest bidder isn't necessarily the best
+result for the user — a low-quality product with deep pockets would crowd out
+a well-reviewed, relevant one, which is bad for the user *and*, long-run, bad
+for the platform (users learn to ignore sponsored results). So instead of
+ranking by `max_cpc` alone, each vendor gets an **Ad Rank**:
+
+```
+Ad Rank = max_cpc × quality × query_relevance
+```
+
+- `quality` (`compute_quality`) blends the product's review rating, its
+  recommendation rate, and (weighted less) how well it matches the query —
+  a data-derived, not vendor-declared, signal.
+- `query_relevance` comes from the *same* hybrid retrieval score (§7) used
+  for organic search — so a vendor bidding on a product nobody's query is
+  actually looking for gets a low Ad Rank regardless of how much they bid.
+
+**Slots and pricing (Generalized Second Price, GSP).** Winners are placed at
+fixed sponsored positions (`SPONSORED_POSITIONS = [1, 3, 5]`, interleaved with
+organic results — never presented as organic). This is a **generalized
+second-price** auction: the price a vendor actually pays (`actual_cpc`) is set
+just high enough that their *effective* Ad Rank still edges out the
+*next-ranked* competitor's — not their own full bid — the same mechanism
+Google Ads uses:
+
+```python
+# src/digikala/phase5_auction/auction.py::quality_adjusted_gsp
+threshold_cpc = (next_rank_ad_rank / my_quality) + 1.0   # cheapest bid that still wins my slot
+actual_cpc    = min(my_max_cpc, max(reserve_cpc, threshold_cpc))
+```
+
+The intuition behind `next_rank_ad_rank / my_quality`: since
+`Ad Rank = cpc × quality`, solving for the `cpc` that would exactly *tie* the
+next competitor's Ad Rank is just algebraic rearrangement —
+`cpc = next_rank_ad_rank / my_quality` — and the `+1.0` nudges it just past a
+tie (Toman being the smallest usable unit here) so the winner's *effective*
+rank strictly beats, not ties, the runner-up. `min(...)` with `my_max_cpc`
+is what makes the one invariant that must never break provably hold:
+
+```
+actual_cpc ≤ max_cpc          # a vendor never pays more than they agreed to
+```
+
+A **reserve price** (`RESERVE_CPC_TOMAN`) sets a floor via the `max(reserve_cpc, ...)`.
+
+**Validation, not just implementation.** `validate_auction_system()` checks 5
+invariants (unique allocation, slots in descending Ad Rank order, `actual_cpc
+≤ max_cpc`, non-negative CPC, valid slot count) over 500 randomized trials —
+0 violations — then runs a 2,000-trial offline simulation comparing this
+mechanism against a naive **highest-bid-only** baseline on a
+quality-weighted-click-value proxy (**+8.29%** lift). The important caveat,
+reported directly in the metrics (`important_limitation`): click-through and
+revenue numbers here are a transparent *offline simulation proxy*, not
+observed real advertising outcomes — there's no real ad marketplace to A/B
+test this against.
+
+**Implemented ≠ claimed.** The project's own bonus rules require a new
+proposed problem to be mentor-approved before its bonus points are claimed.
+So `bonus_claim_supported` is computed as
+`mentor_approved_new_problem AND technical_result_supported` — the technical
+validation above can (and does) pass on its own merits while the bonus claim
+itself stays `false` until `MENTOR_APPROVED_AUCTION=1` is explicitly set. This
+mirrors §10's leakage-ablation instinct: measure and report the number
+honestly, and don't let "it works" quietly become "therefore claim the
+points" without the separate approval the rules actually require.
+
+---
+
+## 18. Dashboard architecture: theming, caching, and section design
+
+The dashboard (`dashboard/app.py`) is a single-file Streamlit app, but three
+design decisions in it are worth understanding on their own:
+
+**1. Instant theme toggle without a Streamlit rerun.** Every color in the
+CSS is a custom property (`var(--bg)`, `var(--text)`, ...) defined twice: once
+under `:root` (light) and once under `:root[data-theme="dark"]` (dark). A tiny
+JS snippet, injected once via `st.components.v1.html`, flips the
+`data-theme` attribute on `<html>` directly in the parent document and
+persists the choice to `localStorage` — **no `st.rerun()`**. This matters
+because an earlier session-state-driven toggle caused a real bug: every theme
+flip triggered a full rerun, which silently reset in-progress widget state
+(a half-filled comparison list, a typed-but-not-submitted query). CSS
+variables + a client-side attribute flip sidesteps that class of bug entirely
+— the whole page re-themes in one paint, and Python-side state is untouched.
+
+**2. Two different caches for two different problems.**
+`@st.cache_resource` holds one shared Python *object* across every user of
+one server process — used for anything expensive to construct exactly once
+(the loaded assistant, the recommendation model, the raw dataframes).
+`@st.cache_data` instead memoizes a *return value* by a hash of its
+arguments — used for cheap-to-hash-but-expensive-to-recompute derived data
+(a JSON metrics file, keyed by its `mtime` so a fresh `python run.py eval`
+run is picked up without a stale cache). Mixing these up in either direction
+is a real footgun: `cache_resource` on something that should vary per input
+would silently return the wrong answer to different users; `cache_data` on a
+huge unhashable object (a loaded assistant) would either error or hash-stall.
+Functions taking a large object that shouldn't be hashed prefix that
+parameter with `_` (`_reviewed_products(_assistant, run_mode)`,
+`_data_intro_bundle(_products, _comments)`) — Streamlit's convention for
+"don't hash this, but do still key the cache on the other arguments."
+
+**3. A real, previously-unaudited caching gap: `st.tabs()` runs every tab,
+every rerun.** Streamlit populates every `st.tabs()` branch's code on *every*
+script rerun — clicking a button on tab 3 still executes tab 1's, 2's, 4's,
+and 5's render functions; only which one is *visible* is client-side CSS.
+Before this was audited, Section 1's EDA pass (`summary_stats` + 5 Plotly
+figures over the full 948k/6.15M-row corpus) silently recomputed on *every*
+interaction anywhere in the app, not just when that tab was actually open —
+the largest single, previously invisible contributor to the dashboard feeling
+slow. Wrapping it in `@st.cache_resource` (point 2 above) turns that into a
+one-time cost per session; every other tab's heavy JSON-file reads got the
+same `mtime`-keyed `@st.cache_data` treatment. The lesson generalizes: in any
+`st.tabs()`-based app, assume every branch runs on every interaction, and
+cache accordingly rather than assuming "it's in an inactive tab" means "it
+didn't run."
+
+**Section/tab information architecture.** The dashboard's top-level tabs
+deliberately mirror the *project brief's own section numbering*
+(`QBC12 _ AI _ Project 3.pdf`: بخش اول → بخش امتیازی) rather than an
+engineer's-eye-view feature list — so a grader can follow the dashboard the
+same way they read the assignment. Section 2 (the assistant) and Section 3
+(prediction) each open with a short "journey": one or two sentences of
+plain-English framing, a small diagram or chart of the actual development
+path (a retrieval-pipeline flow; a baseline→final "climb" bar chart), an
+honest caption about what didn't work or what tradeoff was made, and a
+collapsed technical-terms glossary — *then* the live "Try it" panel. This
+mirrors §13's whole thesis: a demo of a few good outputs isn't evidence a
+system works; showing the metrics and the honest trial-and-error alongside
+the demo is.
+
+---
+
+## 19. Real bugs found and fixed — a live failure-analysis worked example
+
+The brief explicitly asks for **Failure Analysis**: concrete examples of the
+system breaking, the likely cause, and what was done about it — not just a
+list of features that work. This section is that, for real bugs an
+end-to-end dashboard audit surfaced (full details and code pointers in the
+README's "Real bugs found and fixed" section):
+
+- A **data-cleaning bug** (cross-chunk duplicate reviews, §4's dedup logic
+  scoped too narrowly) that silently doubled a review's text and citation in
+  Q&A answers — caught by literally reading a live answer, not by inspecting
+  code, and fixed both in the pipeline and the already-cleaned artifact.
+- A **routing bug** (§9) where the QA cue-word list was missing a word ("ایراد",
+  "flaw") that appears in one of the *brief's own example queries* — a
+  reminder that a routing rule list validated against unit tests can still
+  miss a real, in-brief example if that exact word was never in the test set.
+- A **text-encoding bug** (unescaped HTML entities surviving Persian
+  normalization) invisible in one rendering context (markdown, which decodes
+  it) and visible in another (a plain-text widget) — the kind of bug that
+  hides until the *same data* is shown through a *different* UI surface.
+- A **markdown/LaTeX escaping bug** (`$0`/`$5` in a tooltip, parsed as a
+  LaTeX math delimiter pair) — a reminder that "it's just a plain string" is
+  never quite true once it passes through a markdown renderer.
+
+None of these were caught by the test suite (which still passes, 53/53,
+after every fix) or by reading the code — they were caught by actually
+clicking every button, in both themes, with real inputs, and reading the
+literal output. That's the practical version of §13's abstract point: a
+system that "looks right" in a few demoed examples can still have concrete,
+findable failure modes; the only way to find them is to go looking.
+
+---
+
+## 20. Glossary
 
 | Term | Plain-language meaning |
 |---|---|
@@ -679,6 +999,10 @@ design philosophy in one query.
 | **LLM-as-judge** | Using a language model to score another model's output instead of (or alongside) a human. |
 | **Ablation** | Removing or isolating one component/feature and re-measuring, to find out how much that specific piece actually mattered. |
 | **Pseudo-gold benchmark** | An evaluation benchmark whose "correct answers" are derived programmatically from metadata, not verified by a human — useful, but explicitly not the same as human-labeled ground truth. |
+| **Ad Rank** | A sponsored-search score combining bid, quality, and relevance — decides ranking, not the raw bid alone. |
+| **GSP (Generalized Second Price)** | An auction where the winner pays just enough to beat the next-ranked competitor's Ad Rank, not their own full bid. |
+| **Reserve price** | The minimum price/bid an auction will accept, regardless of how weak competition is. |
+| **`st.cache_resource` vs. `st.cache_data`** | Streamlit's two caches: `cache_resource` shares one Python *object* across all users of a process (e.g. a loaded model); `cache_data` memoizes a *return value* by hashing its arguments (e.g. a parsed JSON file). |
 
 ---
 

@@ -105,6 +105,15 @@ def _inject_theme_css():
 
     /* dataframes / tables */
     [data-testid="stDataFrame"] { color:var(--text); }
+    /* Plotly figures render server-side with a fixed white "plotly_white"
+       template (the theme toggle is client-side only, so the server can't
+       know which theme is active when it builds the figure) -- audited bug:
+       in dark mode this left a harsh, unstyled white rectangle floating on
+       the dark page. Framing it as a deliberate white card (rounded corner +
+       shadow + padding, matching .card/.table-wrap elsewhere) reads as an
+       intentional design choice in both themes instead of a broken one. */
+    [data-testid="stPlotlyChart"] { background:#FFFFFF; border-radius:14px;
+      padding:10px; box-shadow:var(--shadow); border:1px solid var(--border); margin:6px 0; }
     /* st.code() hardcodes a light pre background regardless of Streamlit's own
        theme -- audited bug: white text (from our global color override) on
        that light background was invisible. Force both explicitly. */
@@ -254,7 +263,7 @@ _inject_theme_js()
 st.markdown("""
 <div class="hero">
   <div><h1>🛍️ Digikala Assistant</h1>
-  <p>Discovery · Review Q&A · Compare · Manager analytics · Auction · Human evaluation</p></div>
+  <p>Section 1: Data · Section 2: Smart Assistant · Section 3: Recommendation Prediction · Section 4: Evaluation · Bonus</p></div>
   <div class="theme-pill" title="Toggle light/dark">
     <span class="ic sun">☀️</span><span class="ic moon">🌙</span><span class="knob"></span>
   </div>
@@ -268,9 +277,9 @@ _rm_col, _budget_col = st.columns([2, 3])
 with _rm_col:
     run_mode = st.selectbox(
         "LLM run mode", ["extractive", "local", "hosted_auto", "free", "paid"],
-        index=0, help="extractive = $0 grounded fallback · local = Qwen/Ollama · "
+        index=0, help="extractive = \\$0 grounded fallback · local = Qwen/Ollama · "
                       "hosted_auto = auto-detect a .env key (metis/groq/paid) · "
-                      "free = Groq/OpenRouter · paid = $5 credit",
+                      "free = Groq/OpenRouter · paid = \\$5 credit",
         key="run_mode_select")
 with _budget_col:
     st.caption(f"Budget cap: ${config.BUDGET_USD} · mode: `{run_mode}`")
@@ -296,6 +305,47 @@ def _load_p3():
     return recommend
 
 
+@st.cache_resource(show_spinner=False)
+def _data_intro_bundle(_products: pd.DataFrame, _comments: pd.DataFrame):
+    # Streamlit re-executes every st.tabs() branch on EVERY rerun (a click on
+    # any other tab still runs this code), so without caching this ~948k/6.16M
+    # row EDA pass (stats + 5 Plotly figures) recomputed on every interaction
+    # anywhere in the app -- a major, previously-unaudited source of the
+    # dashboard's slow perceived load time. `_products`/`_comments` are
+    # `_`-prefixed so Streamlit skips hashing them (same pattern as
+    # `_reviewed_products`); this bundle is computed once per session.
+    from digikala.phase1_data import eda
+    stats = eda.summary_stats(_products, _comments)
+    figs = {
+        "balance": eda.fig_recommendation_balance(_comments),
+        "price": eda.fig_price_distribution(_products),
+        "cats": eda.fig_top_categories(_products),
+        "brands": eda.fig_top_brands(_products),
+        "missing": eda.fig_missingness(_products, _comments),
+    }
+    return stats, figs
+
+
+@st.cache_data(show_spinner=False)
+def _read_json_cached(path_str: str, mtime: float):
+    # `mtime` in the cache key means a re-run of `python run.py eval` (which
+    # rewrites the file with a new mtime) is picked up without a stale cache.
+    return json.loads(Path(path_str).read_text(encoding="utf-8"))
+
+
+def _read_metrics_file(name: str):
+    path = config.METRICS_DIR / name
+    if not path.exists():
+        return None
+    return _read_json_cached(str(path), path.stat().st_mtime)
+
+
+def _section_intro(text: str):
+    st.markdown(f'<div class="note" style="color:var(--muted);font-size:.92rem;'
+               f'line-height:1.8;margin:.1rem 0 1rem;direction:ltr;text-align:left">{text}</div>',
+               unsafe_allow_html=True)
+
+
 _card_seq = [0]
 
 
@@ -315,8 +365,8 @@ def _render_answer(ans):
                + (" · ⚠️ missing info" if ans.missing_info else ""))
     _card(ans.text.replace("\n", "  \n"))
     if ans.citations or ans.review_citations:
-        st.caption("Cited: " + " ".join(f"`محصول {c}`" for c in ans.citations)
-                   + " " + " ".join(f"`بازبینی {c}`" for c in ans.review_citations))
+        st.caption("Cited: " + " ".join(f"`product {c}`" for c in ans.citations)
+                   + " " + " ".join(f"`review {c}`" for c in ans.review_citations))
 
 
 def _render_table(df: pd.DataFrame):
@@ -330,8 +380,8 @@ def _render_table(df: pd.DataFrame):
 
 def fmt_toman(x):
     if x is None or pd.isna(x):
-        return "نامشخص"
-    return f"{float(x):,.0f} تومان"
+        return "Unknown"
+    return f"{float(x):,.0f} Toman"
 
 
 _BROWSE_N = 1000  # a browsable slice for the dropdown -- not a cap on what you can reach
@@ -407,91 +457,200 @@ def _search_catalog(_products: pd.DataFrame, query: str, limit: int = 8) -> pd.D
     return hits.head(limit)
 
 
-# ---- pages ----------------------------------------------------------------
-def page_about():
-    st.header("ℹ️ About this project")
-    st.markdown("Product Discovery, Review Q&A, Comparison, Manager Analytics, Model Evaluation, a "
-               "Sponsored Search Auction for three vendors, Human Evaluation, and Dark/Light mode. "
-               "Sponsored results always carry a **Sponsored / تبلیغ** label and are never presented "
-               "to the model or the user as evidence that a product is objectively better.")
-    st.divider()
-    _page_overview()
-    st.divider()
-    _page_bonus()
+# ---- section 1: Data introduction ------------------------------------------
+_COLUMN_GLOSSARY = {
+    "Products (digikala-products.csv)": [
+        ("id", "Product id"), ("fa_title", "Persian product title"), ("Rate", "Recorded rating"),
+        ("cnt_Rate", "Number of ratings recorded"), ("1Category", "Level-1 category"),
+        ("2Category", "Level-2 category"), ("Brand", "Brand"), ("Price", "Price"),
+        ("Seller", "Seller"), ("Fake_Is", "Flag for non-original goods"),
+        ("month_last_price_min", "Lowest price recorded in the past month"), ("category_sub", "General category"),
+    ],
+    "Comments (digikala-comments.csv)": [
+        ("id", "Comment id"), ("title", "Comment title"), ("body", "Comment body text"),
+        ("created_at", "Timestamp"), ("rate", "Rating given by the user"),
+        ("status_recommendation", "Recommendation status (recommended/not_recommended/no_idea)"),
+        ("buyer_is", "Whether the reviewer purchased the product"), ("id_product", "Related product id"),
+        ("advantages / disadvantages", "User-listed pros / cons"),
+        ("likes / dislikes", "Upvotes / downvotes on the comment"), ("title_seller / code_seller", "Seller name / id"),
+        ("true_to_size_rate", "Fit-to-size feedback"),
+    ],
+}
+
+_DATA_METHOD_NOTES = [
+    ("Deduplication", "Exact-duplicate rows and duplicate ids are dropped before anything else is computed "
+     "(see the missingness chart below for what survives)."),
+    ("Missing / invalid values", "Rows with zero or missing price, and other structurally invalid values, "
+     "are removed rather than imputed — the brief explicitly asks this to be a defensible, explained choice, "
+     "not a silent fill."),
+    ("Persian text normalization", "Titles, categories and review text go through Persian-specific "
+     "normalization (`hazm`-based + custom rules) before any search index or model sees them, since raw "
+     "Digikala text mixes half-spaces, Arabic/Persian character variants and inconsistent digits."),
+    ("Scale, not a sample", "Both the EDA below and the live assistant run over the full cleaned corpus — "
+     "948k products and 6.16M comments — not a demo subset. A capped sample is used in exactly one place "
+     "in the whole project: training the Section 3 recommendation classifier (documented on that tab), "
+     "for compute-budget reasons the brief explicitly allows if justified."),
+]
 
 
-def _page_overview():
-    st.header("Phase 1 — Data & EDA")
-    from digikala.phase1_data import eda
+def page_data_intro():
+    st.header("📦 Section 1 · Data introduction")
+    _section_intro(
+        "The raw Digikala dataset ties together over a million products and more than six million Persian "
+        "user comments through a shared product id. It ships raw — completeness, uniqueness, balance, and "
+        "the absence of missing/outlier/duplicate values are not guaranteed; auditing and cleaning that is "
+        "itself part of the assignment.")
     products, comments = _load_tables()
-    stats = eda.summary_stats(products, comments)
+    stats, figs = _data_intro_bundle(products, comments)
     cols = st.columns(4)
     labels = [("Products", stats["n_products"]), ("Comments", stats["n_comments"]),
               ("Brands", stats["n_brands"]), ("Categories", stats["n_categories"])]
     for c, (k, v) in zip(cols, labels):
         c.metric(k, f"{v:,}")
+    st.caption("Full cleaned corpus (no sampling) — the same tables the live assistant searches in Section 2.")
     c1, c2 = st.columns(2)
-    c1.plotly_chart(eda.fig_recommendation_balance(comments), width="stretch", theme=None)
-    c2.plotly_chart(eda.fig_price_distribution(products), width="stretch", theme=None)
+    c1.plotly_chart(figs["balance"], width="stretch", theme=None)
+    c2.plotly_chart(figs["price"], width="stretch", theme=None)
     c3, c4 = st.columns(2)
-    c3.plotly_chart(eda.fig_top_categories(products), width="stretch", theme=None)
-    c4.plotly_chart(eda.fig_top_brands(products), width="stretch", theme=None)
-    st.plotly_chart(eda.fig_missingness(products, comments), width="stretch", theme=None)
+    c3.plotly_chart(figs["cats"], width="stretch", theme=None)
+    c4.plotly_chart(figs["brands"], width="stretch", theme=None)
+    st.plotly_chart(figs["missing"], width="stretch", theme=None)
+    with st.expander("🔧 Cleaning & preprocessing approach (technical notes)"):
+        for title, note in _DATA_METHOD_NOTES:
+            st.markdown(f"**{title}.** {note}")
+    with st.expander("📖 Column glossary"):
+        for title, rows in _COLUMN_GLOSSARY.items():
+            st.markdown(f"**{title}**")
+            st.dataframe(pd.DataFrame(rows, columns=["Column", "Description"]), width="stretch", hide_index=True)
 
 
-def page_try_it():
-    st.header("✨ Try it — search and ask, grounded in the real catalogue")
-    mode = st.radio("Mode", ["🔎 Product discovery", "💬 Ask about a product"], horizontal=True)
+# ---- section 2: Smart shopping assistant & product analysis ---------------
+_RETRIEVAL_TERMS = [
+    ("Dense retrieval (embeddings)", "Every product's text is embedded once into a vector; a query is "
+     "embedded the same way and ranked by cosine similarity — good at matching *meaning* even without "
+     "shared words."),
+    ("BM25 (lexical retrieval)", "A classic term-frequency ranking over the same product text — good at "
+     "matching *exact* words, brand names, and rare terms embeddings can blur together."),
+    ("RRF (Reciprocal Rank Fusion)", "Combines the dense and BM25 rankings by each item's *rank position* "
+     "in each list rather than raw scores, so the two methods (different score scales) fuse fairly."),
+    ("Router", "A deterministic, $0 rule-based classifier picks the intent (discovery / product Q&A / "
+     "comparison / managerial) before any model call, so each intent gets a purpose-built prompt instead "
+     "of one generic one."),
+    ("Grounding & citations", "Answers cite the specific product/review ids used to produce them, so a "
+     "claim can be checked against the actual underlying data instead of taken on faith."),
+]
 
-    if mode == "🔎 Product discovery":
-        q = st.text_input("Describe what you need (Persian):",
-                          "یک کالای اقتصادی و باکیفیت زیر ۵۰۰ هزار تومان می‌خواهم")
-        if st.button("Search", type="primary"):
-            assistant = _load_assistant(run_mode)
-            a = assistant.answer(q)
-            _render_answer(a)
 
-            campaigns = st.session_state.get("auction_campaigns") or []
-            if st.session_state.get("auction_enabled", True) and campaigns:
-                from digikala.phase5_auction import auction as auction_mod
-                hits = assistant.pidx.search(q, k=200, method="hybrid")
-                scores = {h["product_id"]: h["score"] for h in hits}
-                from digikala.phase2_assistant.assistant import review_stats
-                stats_lookup = {}
-                for c in campaigns:
-                    pid = int(c["product_id"])
-                    rs = review_stats(assistant.c, pid, light=True)
-                    if rs["rec_rate"] is not None:
-                        stats_lookup[pid] = {"recommendation_rate": rs["rec_rate"] * 100}
-                sponsored = auction_mod.run_query_auction(campaigns, assistant.c.product, stats_lookup,
-                                                          query_scores=scores)
-                if sponsored:
-                    st.markdown("#### Sponsored results")
-                    for s in sponsored:
-                        prod = assistant.c.product(s["product_id"]) or {}
-                        st.markdown(
-                            f'<div class="auction-card"><span class="sponsored-pill">تبلیغ · Sponsored</span> '
-                            f'<span class="pill">{s["vendor_name"]}</span>'
-                            f'<div style="margin-top:8px;font-weight:700">{prod.get("title_fa", "")}</div>'
-                            f'<div style="margin-top:6px"><span class="pill">Product ID: {s["product_id"]}</span>'
-                            f'<span class="pill">قیمت: {fmt_toman(prod.get("price_clean"))}</span>'
-                            f'<span class="pill">Placement: {s["placement_position"]}</span></div></div>',
-                            unsafe_allow_html=True)
+def page_assistant():
+    st.header("🛍️ Section 2 · Smart shopping assistant & product analysis")
+    _section_intro(
+        "A system built on language models that uses real product data and real user reviews to search, "
+        "answer questions, compare, and analyze products. Every answer is grounded in real data and, where "
+        "applicable, ships with evidence (product/review ids) alongside it.")
 
-            if a.sources:
-                st.markdown("#### Organic results")
-                st.dataframe(pd.DataFrame(a.sources)[["product_id", "title", "brand", "price", "rate", "score"]],
-                             width="stretch")
-    else:
+    st.markdown("**Retrieval pipeline** (development path: lexical-only → dense-only → hybrid)")
+    st.markdown(
+        '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:.3rem 0 1rem">'
+        '<span class="pill">User query (Persian)</span><span>→</span>'
+        '<span class="pill">Router (intent)</span><span>→</span>'
+        '<span class="pill">Dense retrieval</span><span>+</span><span class="pill">BM25</span>'
+        '<span>→</span><span class="pill">RRF fusion (hybrid)</span><span>→</span>'
+        '<span class="pill">LLM / extractive answer + citations</span></div>',
+        unsafe_allow_html=True)
+    m = _read_metrics_file("phase4_metrics.json")
+    abl = (m or {}).get("retrieval_ablation")
+    if abl:
+        import plotly.graph_objects as go
+        methods = list(abl["by_method"].keys())
+        mrrs = [abl["by_method"][k]["mrr"] for k in methods]
+        fig = go.Figure(go.Bar(x=methods, y=mrrs, marker_color=["#3FA9F5", "#FF8A00", "#138A60"],
+                               text=[f"{v:.3f}" for v in mrrs], textposition="outside"))
+        fig.update_layout(title="Trial and error: MRR by retrieval method (title→own-id benchmark)",
+                          template="plotly_white", yaxis=dict(range=[0, 1.1]), height=300,
+                          margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(fig, width="stretch", theme=None)
+        st.caption(f"Hybrid is kept as the default despite a {abl['hybrid_vs_best_single_mrr_lift']:+.3f} MRR "
+                   f"gap to BM25-only on this exact-title benchmark, because it is markedly more robust on "
+                   f"paraphrased, non-exact-title queries — see the natural-language benchmark on the "
+                   f"Evaluation tab for the honest, unhedged comparison.")
+    with st.expander("🔧 Technical terms"):
+        for title, note in _RETRIEVAL_TERMS:
+            st.markdown(f"**{title}.** {note}")
+
+    sub1, sub2, sub3, sub4 = st.tabs([
+        "1) Search & discovery", "2) Q&A", "3) Product comparison", "4) Manager analytics",
+    ])
+    with sub1:
+        _sub_discovery()
+    with sub2:
+        _sub_qa()
+    with sub3:
+        _sub_compare()
+    with sub4:
+        _sub_manager()
+
+
+def _sub_discovery():
+    _section_intro(
+        "The user states a need in natural Persian (product type, price range, brand, satisfaction, ...) "
+        "and the system finds and presents suitable products from the real catalogue.")
+    q = st.text_input("Describe what you need (Persian):",
+                      "یک کالای اقتصادی و باکیفیت زیر ۵۰۰ هزار تومان می‌خواهم")
+    if st.button("Search", type="primary"):
         assistant = _load_assistant(run_mode)
-        pick = _pick_product(assistant, "Product", "qa")
-        q = st.text_input("Question about this product:", "کاربران از کیفیت این محصول راضی بودند؟")
-        if st.button("Ask", type="primary"):
-            _render_answer(assistant.answer(f"{q} محصول {pick}"))
+        a = assistant.answer(q)
+        _render_answer(a)
+
+        campaigns = st.session_state.get("auction_campaigns") or []
+        if st.session_state.get("auction_enabled", True) and campaigns:
+            from digikala.phase5_auction import auction as auction_mod
+            hits = assistant.pidx.search(q, k=200, method="hybrid")
+            scores = {h["product_id"]: h["score"] for h in hits}
+            from digikala.phase2_assistant.assistant import review_stats
+            stats_lookup = {}
+            for c in campaigns:
+                pid = int(c["product_id"])
+                rs = review_stats(assistant.c, pid, light=True)
+                if rs["rec_rate"] is not None:
+                    stats_lookup[pid] = {"recommendation_rate": rs["rec_rate"] * 100}
+            sponsored = auction_mod.run_query_auction(campaigns, assistant.c.product, stats_lookup,
+                                                      query_scores=scores)
+            if sponsored:
+                st.markdown("#### Sponsored results")
+                for s in sponsored:
+                    prod = assistant.c.product(s["product_id"]) or {}
+                    st.markdown(
+                        f'<div class="auction-card"><span class="sponsored-pill">Sponsored</span> '
+                        f'<span class="pill">{s["vendor_name"]}</span>'
+                        f'<div style="margin-top:8px;font-weight:700">{prod.get("title_fa", "")}</div>'
+                        f'<div style="margin-top:6px"><span class="pill">Product ID: {s["product_id"]}</span>'
+                        f'<span class="pill">Price: {fmt_toman(prod.get("price_clean"))}</span>'
+                        f'<span class="pill">Placement: {s["placement_position"]}</span></div></div>',
+                        unsafe_allow_html=True)
+
+        if a.sources:
+            st.markdown("#### Organic results")
+            st.dataframe(pd.DataFrame(a.sources)[["product_id", "title", "brand", "price", "rate", "score"]],
+                         width="stretch")
 
 
-def page_compare():
-    st.header("⚖️ Product comparison — Try it!")
+def _sub_qa():
+    _section_intro(
+        "Ask about a specific product, grounded in real user reviews — e.g. \"what did people like most?\" "
+        "or \"what are the recurring complaints about this product?\". Answers are documented with evidence "
+        "(review ids).")
+    assistant = _load_assistant(run_mode)
+    pick = _pick_product(assistant, "Product", "qa")
+    q = st.text_input("Question about this product:", "کاربران از کیفیت این محصول راضی بودند؟")
+    if st.button("Ask", type="primary"):
+        _render_answer(assistant.answer(f"{q} محصول {pick}"))
+
+
+def _sub_compare():
+    _section_intro(
+        "Compare two to four products on price, product info, user satisfaction, and recurring "
+        "strengths/weaknesses. The answer distinguishes direct data facts from the model's own inference "
+        "or final suggestion.")
     st.caption("Search the catalogue by name/brand/category, add matches to the comparison list, "
                "then pick 2–4 products to compare. No need to already know a product id.")
     assistant = _load_assistant(run_mode)
@@ -500,7 +659,7 @@ def page_compare():
     if "compare_ids" not in st.session_state:
         st.session_state.compare_ids = []
 
-    finder = st.text_input("Search the catalogue (e.g. شامپو):", key="compare_finder")
+    finder = st.text_input("Search the full catalogue (e.g. شامپو):", key="compare_finder")
     matches = _search_catalog(products, finder, limit=8)
     if finder.strip() and matches.empty:
         st.info("No matches for this search.")
@@ -510,9 +669,9 @@ def page_compare():
         with c1:
             st.markdown(
                 f'<div class="pill">ID: {pid}</div> <b>{row["title_fa"]}</b><br>'
-                f'<span class="pill">برند: {row["brand_norm"] or "—"}</span>'
-                f'<span class="pill">دسته: {row["category1_norm"] or "—"}</span>'
-                f'<span class="pill">قیمت: {fmt_toman(row["price_clean"])}</span>',
+                f'<span class="pill">Brand: {row["brand_norm"] or "—"}</span>'
+                f'<span class="pill">Category: {row["category1_norm"] or "—"}</span>'
+                f'<span class="pill">Price: {fmt_toman(row["price_clean"])}</span>',
                 unsafe_allow_html=True)
         with c2:
             st.code(str(pid), language=None)
@@ -540,7 +699,7 @@ def page_compare():
                 st.session_state.compare_ids.append(pid)
             _select_for_compare(pid)
         if invalid:
-            st.warning(f"Outside the sampled catalogue or not numeric, skipped: {', '.join(invalid)}")
+            st.warning(f"Not in the catalogue or not numeric, skipped: {', '.join(invalid)}")
         st.rerun()
     if mc2.button("Clear comparison list", width="stretch"):
         st.session_state.compare_ids = []
@@ -570,8 +729,11 @@ def page_compare():
         _render_answer(assistant.answer(f"{ids_clause} را از نظر قیمت و کیفیت و رضایت کاربران مقایسه کن"))
 
 
-def page_manager():
-    st.header("📊 Manager analytics — Try it!")
+def _sub_manager():
+    _section_intro(
+        "The user isn't always a buyer — a category manager can use the same data to understand the "
+        "market and the customer experience: the most recurring complaints and dissatisfaction drivers "
+        "across an entire product category.")
     assistant = _load_assistant(run_mode)
     cats = (assistant.c.products["category1_norm"].replace("نامشخص", pd.NA)
             .dropna().value_counts().index.tolist())
@@ -590,14 +752,58 @@ def page_manager():
                                 width="stretch", theme=None)
 
 
-def page_model_eval():
+_PREDICTION_TERMS = [
+    ("Macro-F1", "The unweighted average of per-class F1 across all three classes. Chosen (per the brief) "
+     "because performance on every class matters — a model that is great on the majority class and bad on "
+     "the other two would still score well on plain accuracy but poorly here."),
+    ("Product-grouped split (primary)", "Train/test are split so no product's reviews appear on both "
+     "sides. This is the harder, honest split: it stops the model from memorizing per-product phrasing "
+     "instead of learning general sentiment/recommendation language."),
+    ("Leakage ablation", "`rate`, `likes`, and `is_buyer` numerically restate or post-hoc correlate with "
+     "the label itself. Adding them inflates the score (a textbook leakage pattern) — the ablation below "
+     "quantifies that inflation and the final model excludes those features."),
+]
+
+
+# ---- section 3: Recommendation-status prediction ---------------------------
+def page_prediction():
+    st.header("🎯 Section 3 · Recommendation-status prediction")
+    _section_intro(
+        "A model that, given the text of a review, predicts its recommendation status as one of three "
+        "classes: <b>recommended</b> / <b>not_recommended</b> / <b>no_idea</b>. The primary evaluation "
+        "metric is <b>Macro-F1</b> (not just accuracy on the majority class), and train/test leakage is "
+        "prevented with a <b>product-grouped</b> split.")
+
+    m = _read_metrics_file("phase3_metrics.json")
+    if m:
+        base = m.get("baselines_val_macro_f1", {})
+        lora = _read_metrics_file("phase3_lora_metrics.json")
+        names = ["Majority baseline", "Logistic regression", "TF-IDF + LinearSVC (final, primary)"]
+        vals = [base.get("majority"), base.get("logreg"), m.get("primary_macro_f1", m.get("grouped_macro_f1"))]
+        if lora:
+            names.append(f"LoRA fine-tune ({lora['model'].split('/')[-1]})")
+            vals.append(lora.get("lora_macro_f1"))
+        import plotly.graph_objects as go
+        colors = ["#94A3B8", "#3FA9F5", "#138A60", "#FF8A00"][: len(names)]
+        fig = go.Figure(go.Bar(x=names, y=vals, marker_color=colors,
+                               text=[f"{v:.3f}" if v is not None else "-" for v in vals], textposition="outside"))
+        fig.update_layout(title="The climb: trial and error from a naive baseline to the final model",
+                          template="plotly_white", yaxis=dict(range=[0, 1], title="Macro-F1"), height=340,
+                          margin=dict(l=10, r=10, t=50, b=10), showlegend=False)
+        st.plotly_chart(fig, width="stretch", theme=None)
+        if lora:
+            st.caption(f"LoRA fine-tuning of a Persian BERT was tried as an experiment ({lora['note']}) and "
+                       f"landed {lora['lora_vs_baseline_delta']:+.4f} vs. the TF-IDF baseline on a smaller, "
+                       f"non-apples-to-apples sample — reported honestly as a negative result, not hidden.")
+    with st.expander("🔧 Technical terms"):
+        for title, note in _PREDICTION_TERMS:
+            st.markdown(f"**{title}.** {note}")
+
     _page_predictor()
-    st.divider()
-    _page_eval()
 
 
 def _page_predictor():
-    st.header("🤖 Recommendation predictor (Phase 3) — Try it!")
+    st.subheader("🤖 Try it")
     st.caption("Text-only model — no `rate`/`likes`/`is_buyer` (those leak the label). "
                "Predicts recommendation purely from the review text.")
     recommend = _load_p3()
@@ -605,9 +811,8 @@ def _page_predictor():
     if st.button("Predict", type="primary"):
         pred = recommend.predict(txt)[0]
         st.success(f"Predicted recommendation_status: **{pred}**")
-    mfile = config.METRICS_DIR / "phase3_metrics.json"
-    if mfile.exists():
-        m = json.loads(mfile.read_text(encoding="utf-8"))
+    m = _read_metrics_file("phase3_metrics.json")
+    if m:
         c1, c2, c3 = st.columns(3)
         c1.metric("Product-grouped Macro-F1 (primary)", m.get("primary_macro_f1", m.get("grouped_macro_f1")))
         c2.metric("Naive random-split Macro-F1", m.get("test_macro_f1"))
@@ -624,13 +829,26 @@ def _page_predictor():
         st.plotly_chart(recommend.fig_confusion(m), width="stretch", theme=None)
 
 
+# ---- section 4: Final system evaluation ------------------------------------
+def page_evaluation():
+    st.header("🧪 Section 4 · Final system evaluation")
+    _section_intro(
+        "System evaluation across several angles: <b>answer quality</b>, <b>Grounding</b> (claims backed "
+        "by evidence), <b>Retrieval Quality</b>, <b>recommendation-prediction</b> performance, "
+        "<b>Latency</b>, <b>Cost</b>, and <b>Failure Analysis</b> — alongside a comparison against human "
+        "evaluation.")
+    sub1, sub2 = st.tabs(["📈 Metrics", "🧑‍⚖️ Human evaluation"])
+    with sub1:
+        _page_eval()
+    with sub2:
+        page_human_eval()
+
+
 def _page_eval():
-    st.header("🧪 Evaluation (Phase 4)")
-    mfile = config.METRICS_DIR / "phase4_metrics.json"
-    if not mfile.exists():
+    m = _read_metrics_file("phase4_metrics.json")
+    if not m:
         st.info("Run `python run.py eval` first to generate metrics.")
         return
-    m = json.loads(mfile.read_text(encoding="utf-8"))
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Recall@10", m["retrieval_quality"]["recall@k"])
     c2.metric("MRR", m["retrieval_quality"]["mrr"])
@@ -640,8 +858,27 @@ def _page_eval():
     c5.metric("Mean latency (s)", m["generation"]["mean_latency_s"])
     c6.metric("Citation coverage", m["generation"]["mean_citation_coverage"])
     c7.metric("Total cost ($)", m["cost"]["total_cost_usd"])
+
+    st.subheader("API usage (brief's cost-reporting requirement)")
+    cost = m["cost"]
+    c8, c9, c10, c11 = st.columns(4)
+    c8.metric("API attempts", cost.get("api_attempts", 0))
+    c9.metric("Successful calls", cost.get("successful_calls", 0))
+    c10.metric("Input tokens", f"{cost.get('input_tokens', 0):,}")
+    c11.metric("Output tokens", f"{cost.get('output_tokens', 0):,}")
+    st.caption(f"Estimated list cost (what it would cost even for a free tier): "
+               f"${cost.get('estimated_list_cost_usd', 0):.4f} · Budget: "
+               f"${cost.get('budget_usd', 0):.2f} · Remaining: ${cost.get('remaining_usd', 0):.2f}")
+
     st.subheader("Per-intent breakdown")
-    st.dataframe(pd.DataFrame(m["generation"]["by_intent"]), width="stretch")
+    by_intent = pd.DataFrame(m["generation"]["by_intent"])
+    st.dataframe(by_intent, width="stretch")
+    if "intent" in by_intent.columns and "mean_latency_s" in by_intent.columns:
+        import plotly.graph_objects as go
+        fig = go.Figure(go.Bar(x=by_intent["intent"], y=by_intent["mean_latency_s"], marker_color="#3FA9F5"))
+        fig.update_layout(title="Mean latency by intent (monitoring)", template="plotly_white", height=300,
+                          margin=dict(l=10, r=10, t=50, b=10), yaxis_title="seconds")
+        st.plotly_chart(fig, width="stretch", theme=None)
 
     c8, c9, c10 = st.columns(3)
     c8.metric("Proxy task completion (0-5)", m["generation"].get("mean_task_completion_proxy_0_5"))
@@ -717,7 +954,7 @@ def page_auction():
     st.header("📣 Sponsored Search Auction")
     st.caption("Three vendors each register a Product ID and a Max CPC. Ad Rank = Max CPC × data-derived "
                "quality × query relevance — the highest bidder does not automatically win. Winners are "
-               "labeled **Sponsored / تبلیغ** and are never presented as organic recommendations or as "
+               "labeled **Sponsored** and are never presented as organic recommendations or as "
                "evidence a product is objectively better. Actual CPC never exceeds a vendor's own Max CPC.")
     assistant = _load_assistant(run_mode)
     products = assistant.c.products
@@ -829,8 +1066,21 @@ def page_human_eval():
     st.caption(f"{fresh_count} of {len(candidates)} candidates labeled against their current answer.")
 
 
+# ---- section 5: Bonus -------------------------------------------------------
+def page_bonus():
+    st.header("🏆 Bonus section")
+    _section_intro(
+        "Retrieval improvement via Hybrid Search, LoRA fine-tuning, a multi-intent Router, a Sponsored "
+        "Search Auction (a new proposed problem, pending mentor approval), Caching/optimization, and a "
+        "coherent presentation with a clear storyline.")
+    sub1, sub2 = st.tabs(["📖 Project storyline & scorecard", "📣 Sponsored Search Auction"])
+    with sub1:
+        _page_bonus()
+    with sub2:
+        page_auction()
+
+
 def _page_bonus():
-    st.header("🏆 Bonus & Engineering")
     efile = config.METRICS_DIR / "engineering_notes.json"
     if not efile.exists():
         st.info("Run `python run.py eval` (writes phase4 metrics) and see artifacts/metrics/engineering_notes.json.")
@@ -905,10 +1155,16 @@ def _page_bonus():
                  "TF-IDF baseline on the identical product-grouped split.")
 
 
+# Top-level tabs mirror the project brief's own section order (section 1..the
+# bonus section) rather than an arbitrary feature list, with sub-tabs for each
+# part inside section 2 (search/QA/compare/manager) and section 4
+# (metrics/human eval) -- see QBC12 _ AI _ Project 3.pdf.
 TABS = [
-    ("✨ Try it", page_try_it), ("⚖️ Compare", page_compare), ("📊 Manager", page_manager),
-    ("🧪 Model & Evaluation", page_model_eval), ("📣 Auction", page_auction),
-    ("🧑‍⚖️ Human eval", page_human_eval), ("ℹ️ About", page_about),
+    ("📦 Section 1 · Data", page_data_intro),
+    ("🛍️ Section 2 · Smart Assistant", page_assistant),
+    ("🎯 Section 3 · Recommendation Prediction", page_prediction),
+    ("🧪 Section 4 · Evaluation", page_evaluation),
+    ("🏆 Bonus", page_bonus),
 ]
 for tab, (_, render) in zip(st.tabs([t[0] for t in TABS]), TABS):
     with tab:

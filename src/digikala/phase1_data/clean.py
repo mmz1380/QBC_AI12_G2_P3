@@ -230,9 +230,21 @@ def build(full: bool = True) -> dict:
     c_total: dict = {}
     writer = None
     if full:
+        # `_dedup` inside clean_comments only sees one chunk at a time, so a
+        # comment id that happens to repeat in the RAW csv further apart than
+        # one CHUNK_SIZE (a real, observed pattern in this dataset) survives
+        # into the output as a cross-chunk duplicate -- silently doubling that
+        # review's text in every downstream citation/quote. `seen_ids` makes
+        # the dedup global across the whole stream, not just per chunk.
+        seen_ids: set[int] = set()
         log.info("streaming + cleaning comments in chunks of %d", config.CHUNK_SIZE)
         for i, chunk in enumerate(dataio.iter_comment_chunks()):
             cleaned, rep = clean_comments(chunk, valid_ids)
+            is_new = ~cleaned["comment_id"].isin(seen_ids)
+            rep["dropped_cross_chunk_duplicate_ids"] = int((~is_new).sum())
+            cleaned = cleaned[is_new]
+            rep["output_rows"] = len(cleaned)
+            seen_ids.update(int(x) for x in cleaned["comment_id"].dropna())
             _merge_reports(c_total, rep)
             table = pa.Table.from_pandas(cleaned, preserve_index=False)
             if writer is None:

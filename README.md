@@ -257,7 +257,7 @@ the judge's own scores. A human labeler scores the same queries into
 (`{"query": {"relevance": n, "faithfulness": n, "answer_hash": "..."}, ...}`);
 `evaluate.human_eval_comparison` reports Spearman ρ as
 `phase4_metrics.json["human_eval_agreement"]`, shown on the dashboard's
-Evaluation page. Each candidate carries an `answer_hash` (of its exact answer
+**Section 4 · Evaluation → Human evaluation** tab. Each candidate carries an `answer_hash` (of its exact answer
 text); a label only counts if its `answer_hash` still matches the current
 candidate — otherwise it's a **stale** label (the code changed since it was
 scored, so it's no longer scoring the answer the system currently produces)
@@ -275,9 +275,9 @@ n = 14)** — a moderate positive correlation, borderline significance;
 relevance agreement was empty (`{}`) because the judge never produced a
 comparable score for that axis. Re-labeling against the current answers is a
 reasonable next step but wasn't repeated this session (large scope already
-covered) — the dashboard's Evaluation page shows the live, current status.
+covered) — the dashboard's Section 4 · Evaluation tab shows the live, current status.
 
-## Results (full corpus: 948,352 products / 6,155,711 comments)
+## Results (full corpus: 948,352 products / 6,153,060 comments)
 
 | Metric | Value |
 |---|---|
@@ -290,8 +290,10 @@ covered) — the dashboard's Evaluation page shows the live, current status.
 | Response quality: judge relevance / deterministic task-completion proxy | 4.0/5 / 4.80/5 (judge relevance parsed here; parsing is query-set-dependent — see judge limitations) |
 | Judge-vs-human agreement | 16/16 prior labels now STALE (answers changed this session) — see below |
 | Failure analysis | 0/40 retrieval misses; 2/4 adversarial generation probes correctly flagged; 1-2/10 router edge cases (see "Router regression caught") |
-| LoRA (ParsBERT) vs. TF-IDF baseline | 0.7049 vs. **0.7291** (baseline wins on this capped comparison) — `phase3_lora_metrics.json` / dashboard Bonus page |
+| LoRA (ParsBERT) vs. TF-IDF baseline | 0.7049 vs. **0.7291** (baseline wins on this capped comparison) — `phase3_lora_metrics.json` / dashboard Bonus tab |
+| Sponsored Search Auction: invariant pass rate / quality-proxy lift vs. bid-only | **1.0** (0/500 trials) / **+8.29%** — `auction_metrics.json`, mentor approval pending |
 | API cost / budget | **$0.00 / $5.00** |
+| API requests (attempted / successful) / input+output tokens | **0 / 0 / 0+0** — this run used the $0 extractive tier; `phase4_metrics.json["cost"]` and the dashboard's Section 4 · Evaluation tab report the live counts for whichever run mode actually made hosted calls |
 
 **Retrieval ablation caveat:** the title-benchmark queries are each product's
 own title — a near-exact lexical match that structurally favors BM25, so
@@ -303,12 +305,12 @@ is a real, corroborated property of this embedding model on this catalogue
 benchmark artifact. Hybrid clearly beats dense-only on both benchmarks.
 
 *(Live numbers: `artifacts/metrics/phase3_metrics.json` and `phase4_metrics.json`;
-dashboard's Evaluation + Bonus & Engineering pages render the current run.)*
+the dashboard's Section 4 · Evaluation and Bonus tabs render the current run.)*
 
 ## Bonus work
 
 Full self-assessment + evidence pointers: `artifacts/metrics/engineering_notes.json`
-and the dashboard's **🏆 Bonus & Engineering** page.
+and the dashboard's **🏆 Bonus** section.
 
 - **Router (no-LLM intent routing).** The deterministic 4-way `IntentRouter`
   (discovery/product_qa/comparison/managerial) costs $0 and ~0ms per query instead
@@ -320,7 +322,10 @@ and the dashboard's **🏆 Bonus & Engineering** page.
   (assistant load 13.6s→3.1s, discovery 3.4s→0.04s); `managerial_summary` direct
   string compare instead of per-row hazm (79.5s→2.1s); memory-mapped product vectors;
   `GroupedComments` for O(1) per-product review access instead of N sub-frames;
-  `st.cache_resource` in the dashboard.
+  **per-product review embeddings + BM25 cached in `ReviewRetriever`** so repeat
+  QA/comparison/managerial calls on the same product skip re-embedding entirely
+  (live-measured: managerial mean latency 91.6s → 10.4s on re-test); `st.cache_resource`
+  / `st.cache_data` throughout the dashboard.
 - **Hybrid retrieval, quantified.** `python run.py eval` now also runs
   `retrieval_ablation` — the same title→own-id auto-labeled queries scored under
   `dense`-only, `bm25`-only, and `hybrid` (RRF) retrieval, reporting hybrid's MRR
@@ -332,14 +337,82 @@ and the dashboard's **🏆 Bonus & Engineering** page.
   Macro-F1 delta in `artifacts/metrics/phase3_lora_metrics.json`. The training set
   is further capped for laptop-GPU feasibility — documented in the module
   docstring as a reasoned resource trade-off, not treated as a full-data result.
-- **Interactive dashboard** covers all 4 phases with live "Try it!" panels, plus
-  a dedicated Evaluation page (retrieval ablation, failure analysis, judge-vs-human
-  agreement) and this Bonus & Engineering page.
-- **Presentation storyline** — the dashboard's Bonus & Engineering page opens with
+- **Sponsored Search Auction** (`src/digikala/phase5_auction/auction.py`) — a
+  mentor-suggested new problem: three vendors bid a Max CPC on a product; a
+  **quality-adjusted Generalized Second Price** auction ranks by
+  `Ad Rank = max_cpc × quality × query_relevance` (not bid alone), charges a
+  second-price-style CPC capped at the vendor's own Max CPC, and validates 5
+  invariants (unique allocation, descending Ad Rank, `actual_cpc ≤ max_cpc`, ...)
+  over 500 randomized trials (0 violations) plus a 2000-trial offline simulation
+  vs. a naive highest-bid baseline (+8.29% quality-proxy lift). Live in the
+  dashboard's **Bonus → Sponsored Search Auction** tab. Per project rules,
+  *implemented and validated* is kept explicitly separate from *bonus claimed*:
+  `bonus_claim_supported` stays `false` until a mentor sets
+  `MENTOR_APPROVED_AUCTION=1`, regardless of how the technical validation looks.
+- **Interactive dashboard**, restructured to mirror the project brief's own
+  section order (`QBC12 _ AI _ Project 3.pdf`) rather than an arbitrary feature
+  list: **Section 1 · Data**, **Section 2 · Smart Assistant** (4 sub-tabs — one
+  per part of the brief's section 2), **Section 3 · Recommendation Prediction**,
+  **Section 4 · Evaluation** (metrics + human evaluation sub-tabs), and
+  **Bonus** (storyline/scorecard + the Auction). Sections 2 and 3 each open
+  with a short "journey" — a retrieval-pipeline diagram / a baseline→final
+  "climb" chart, an honest trial-and-error caption, and a technical-terms
+  expander — before the live "Try it" panel.
+- **Presentation storyline** — the dashboard's Bonus tab opens with
   a problem → decisions → experiments → results → failures narrative tying the
   above together.
-- **Not pursued:** a new mentor-approved problem (no mentor channel available in
-  this workflow).
+- **Not pursued:** the auction bonus item is implemented and validated but its
+  bonus *claim* is intentionally withheld pending real mentor sign-off (see above).
+
+### Real bugs found and fixed (dashboard/backend audit session)
+
+A full click-through audit of every dashboard "Try it" panel (light + dark
+mode, every widget) surfaced four genuine, previously-unnoticed bugs — caught
+by actually exercising each feature end-to-end, not by reading the code:
+
+1. **Cross-chunk duplicate reviews.** `phase1_data/clean.py` streams the raw
+   comments CSV in chunks and deduped `id` *within* each chunk only
+   (`_dedup(..., id_col="id")`); a comment id repeating in the raw CSV further
+   apart than one `CHUNK_SIZE` survived as a duplicate row in the final
+   dataset. Found live: a Q&A answer quoted the same review twice, verbatim,
+   with the same `[بازبینی id]` citation. Confirmed on disk: 2,651 duplicate
+   `comment_id` rows out of 6,155,711. Fixed the pipeline (`build()` now
+   tracks a cross-chunk `seen_ids` set) and the existing artifacts in place
+   (`comments_clean.parquet`, and the saved product-index snapshot's
+   `comment_count` column, recomputed from the deduped table — embeddings
+   were untouched, since only a review-count statistic depended on the
+   duplicate rows).
+2. **Router misrouting a literal brief example.** `IntentRouter`'s QA-cue
+   word list (`router.py:_QA`) didn't include "ایراد" ("flaw/defect") or
+   "چیست" ("what is") — so the query **"ایرادهای پرتکرار این محصول
+   چیست؟"** ("what are the recurring flaws of this product?"), which is
+   *verbatim one of the four example queries in the project brief itself*,
+   fell through to the `discovery` intent and returned unrelated book
+   recommendations instead of answering about the product. Fixed by adding
+   `"ایراد"`, `"عیب"`, and `"چیست"` to `_QA`; verified via a direct
+   `IntentRouter.route()` check and the full test suite (53/53 passing).
+3. **Unescaped HTML entities in scraped text.** ~2,100 product titles/brands
+   contain literal `&amp;` (e.g. a brand rendered as "بیو &amp; پلاس"
+   instead of "بیو & پلاس") — invisible in `st.markdown` (the browser
+   decodes it) but visible verbatim in any plain-text widget, e.g. the
+   Compare tab's multiselect tags. `persian_text.normalize()` now calls
+   `html.unescape()` first; the existing cleaned/indexed artifacts were
+   patched in place (no need to re-run the full pipeline or re-embed).
+4. **A literal `$` swallowed by markdown/LaTeX.** The run-mode selectbox's
+   tooltip (`help="... = $0 ... = $5 credit"`) has two unescaped `$` — Streamlit's
+   markdown renderer treats a `$...$` pair as inline LaTeX, so the entire
+   middle of the tooltip silently mis-rendered. Fixed by escaping both `\$`.
+
+Also audited and fixed: Plotly charts render server-side with a fixed
+`plotly_white` template (the light/dark toggle is client-side-only, so the
+server can't know which theme is active), which left a jarring unstyled white
+rectangle in dark mode — now framed as a deliberate white card (rounded
+corner, shadow, border) so it reads as a design choice in both themes instead
+of a bug. And a real, previously-unaudited performance bug: `st.tabs()`
+re-executes **every** tab's render function on **every** rerun (a click on
+any other tab), so the Section 1 EDA pass (five Plotly figures over
+948k/6.15M rows) was recomputing on every interaction anywhere in the app;
+now cached once per session (`_data_intro_bundle`).
 
 ### Comparison against a second reference implementation
 

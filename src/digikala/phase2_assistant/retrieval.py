@@ -262,6 +262,26 @@ class ReviewRetriever:
     def __init__(self, comments_by_product, rrf_k: int = 60):
         self.by_product = comments_by_product
         self.rrf_k = rrf_k
+        # Per-product review embeddings + BM25 index, built once and reused
+        # across every subsequent call for that product within the process --
+        # `retrieve()` used to re-embed and rebuild BM25 from scratch on every
+        # single query, which is the dominant cost behind the managerial
+        # intent's ~90s mean latency (it evaluates many products per query)
+        # and made re-asking about the same product in the Q&A tab redundantly
+        # slow. `by_product` is immutable after `build_assistant`, so caching
+        # by product_id here is safe for the life of the process.
+        self._product_cache: dict[int, tuple] = {}
+
+    def _product_texts_index(self, product_id: int, rev: pd.DataFrame):
+        cached = self._product_cache.get(product_id)
+        if cached is not None:
+            return cached
+        texts = rev["comment_text_norm"].fillna("").tolist()
+        dense_vectors = embed(texts)
+        bm25 = BM25Okapi.from_texts(texts)
+        result = (texts, dense_vectors, bm25)
+        self._product_cache[product_id] = result
+        return result
 
     @staticmethod
     def _rating_norm(rate: np.ndarray) -> np.ndarray:
@@ -291,10 +311,10 @@ class ReviewRetriever:
         if rev is None or rev.empty:
             return []
         rev = rev.reset_index(drop=True)
-        texts = rev["comment_text_norm"].fillna("").tolist()
+        texts, dense_vectors, bm25_idx = self._product_texts_index(int(product_id), rev)
         qv = embed([query])[0]
-        dense = embed(texts) @ qv
-        sparse = BM25Okapi.from_texts(texts).get_scores(query)
+        dense = dense_vectors @ qv
+        sparse = bm25_idx.get_scores(query)
 
         pool = min(len(rev), max(int(config.REVIEW_CANDIDATE_POOL), int(k) * 10))
         order_d = np.argsort(-dense, kind="stable")[:pool].tolist()
