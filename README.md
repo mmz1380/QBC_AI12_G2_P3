@@ -390,11 +390,3 @@ this repo; several of its ideas were genuinely more advanced and were ported in:
 Corroborating, not copied: the reference's own retrieval benchmark
 independently found the same lexical-beats-hybrid result — see "Two retrieval
 benchmarks, on purpose" above.
-
-## Team
-
-Phase 1 & 2 (this coding style): **Mesbah** · integrated notebook: **Hossein** ·
-Phase 3: **Alireza, Mohammadali, Erfan**. Working language: English.
-
-Teammates' original source notebooks are preserved under `reference/` for provenance;
-their ideas are integrated into `src/digikala/`.
